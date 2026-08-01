@@ -183,3 +183,46 @@ def test_switching_profile_redraws_exactly_once():
                         if any(cid == profile_id for cid, _ in fn.targets)]
     assert not bound_to_profile, "profile must not also trigger a redraw directly"
     assert len(_chained(renders)) == 1, "expected exactly one redraw chained after the reset"
+
+
+def test_the_render_result_is_reported_not_handed_back_as_a_file():
+    """Gradio serves a file by copying it into its own cache, and refuses outright for
+    anything outside the working directory or the temp folder.
+
+    Rendering to a normal location - which is most of them - therefore blew up *after* the
+    depth map had been written, so a finished render looked like a crash. Reporting the path
+    also avoids duplicating gigabytes to hand back a file the user chose the location of.
+    """
+    from dsf.ui import Session, build_app
+
+    demo = build_app(Session(), native_dialogs=False)
+    renders = _named(demo, "render_clip")
+    assert len(renders) == 1
+    outputs = renders[0].outputs
+    assert len(outputs) == 1, "the status message should be the only output"
+
+    kinds = {type(block).__name__ for block in demo.blocks.values()}
+    assert "File" not in kinds, "a File output would reintroduce the cache-copy failure"
+
+
+def test_a_failed_render_reports_instead_of_raising(monkeypatch, tmp_path):
+    """A bad render should say so in the app rather than surfacing a raw traceback."""
+    import dsf.pipeline as pipeline
+    from dsf.controls import KNOBS, defaults
+    from dsf.ui import Session, build_app
+
+    session = Session()
+    session.rgb_path, session.depth_path = str(tmp_path), str(tmp_path)
+
+    def explode(*a, **k):
+        raise RuntimeError("codec went missing")
+
+    # render_clip imports run_fix at call time, so patching the module reaches it.
+    monkeypatch.setattr(pipeline, "run_fix", explode)
+
+    demo = build_app(session, native_dialogs=False)
+    render_clip = _named(demo, "render_clip")[0].fn
+    values = defaults()
+    message = render_clip(str(tmp_path / "out"), 0,
+                          *[values[k.key] for k in KNOBS])
+    assert "Render failed" in message and "codec went missing" in message

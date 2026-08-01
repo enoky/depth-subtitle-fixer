@@ -12,6 +12,7 @@ quietly missing here.
 from __future__ import annotations
 
 import tempfile
+import traceback
 from pathlib import Path
 
 import numpy as np
@@ -202,8 +203,16 @@ def build_app(session: "Session | None" = None, native_dialogs: bool = True):
         return sheet[..., ::-1], stats  # BGR -> RGB for gradio
 
     def render_clip(out_path, max_frames, *values, progress=gr.Progress()):
+        """Render the whole clip and report where it went.
+
+        The result is deliberately *not* offered as a download. Gradio serves a file by
+        copying it into its own cache, which for a feature-length depth map means duplicating
+        gigabytes to hand back something already sitting at a path the user chose - and it
+        refuses outright for anything outside the working directory or the temp folder, which
+        is most places anyone would actually write to.
+        """
         if session.rgb_path is None:
-            return "Load a clip pair first.", None
+            return "Load a clip pair first."
         from .pipeline import run_fix
 
         cfg = build_config(dict(zip(control_keys, values)))
@@ -213,18 +222,25 @@ def build_app(session: "Session | None" = None, native_dialogs: bool = True):
             out = str(Path(tempfile.gettempdir()) / f"{source.stem}_fixed")
             if not source.is_dir():
                 out += source.suffix or ".mp4"
-        total = (int(max_frames) if max_frames else session.max_frame() + 1) or None
+        limit = int(max_frames) if max_frames and int(max_frames) > 0 else None
+        total = limit or (session.max_frame() + 1) or None
 
         def tick(n: int) -> None:
             if total:
                 progress(min(1.0, n / total), desc=f"{n}/{total} frames")
 
-        result = run_fix(session.rgb_path, session.depth_path, out, cfg,
-                         max_frames=int(max_frames) if max_frames else None,
-                         on_render=tick)
-        # A folder of frames is not something to hand back as a single download.
-        listing = None if Path(out).is_dir() else out
-        return f"Wrote {result['frames']} frames to {out}", listing
+        try:
+            result = run_fix(session.rgb_path, session.depth_path, out, cfg,
+                             max_frames=limit, on_render=tick)
+        except Exception as exc:  # noqa: BLE001 - the app must not die on a bad render
+            # Full traceback to the console for diagnosis; one readable line in the app.
+            traceback.print_exc()
+            return f"**Render failed.** {type(exc).__name__}: {exc}"
+
+        target = Path(out)
+        what = "frames in" if target.is_dir() else "frames to"
+        note = "  \n".join(f"note: {n}" for n in result["notes"])
+        return f"Wrote {result['frames']} {what} `{out}`" + (f"  \n{note}" if note else "")
 
     # ------------------------------------------------------------------- layout
 
@@ -298,7 +314,6 @@ def build_app(session: "Session | None" = None, native_dialogs: bool = True):
                                            min_width=150, elem_classes="dsf-browse")
                 lay_out("encode")
                 render_status = gr.Markdown()
-                render_file = gr.File(label="Result")
 
         control_widgets = [widgets[key] for key in control_keys]
         live_widgets = [widgets[k.key] for k in KNOBS if k.live]
@@ -327,7 +342,7 @@ def build_app(session: "Session | None" = None, native_dialogs: bool = True):
         ).then(render_frame, preview_inputs, [sheet, stats])
 
         render_btn.click(render_clip, [out_path, max_frames, *control_widgets],
-                         [render_status, render_file])
+                         render_status)
 
     return demo
 
