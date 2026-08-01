@@ -337,8 +337,12 @@ def build_app(session: "Session | None" = None, native_dialogs: bool = True):
                                            placeholder="all")
                     render_btn = gr.Button("Render full clip", variant="primary", scale=0,
                                            min_width=150, elem_classes="dsf-browse")
+                # Directly under the button, and never empty. Gradio draws a progress bar
+                # over the output component, so this is where the bar appears - put it below
+                # the Encoding panel and it lands off the bottom of a tall page, which is
+                # indistinguishable from having no progress at all.
+                render_status = gr.Markdown("Ready to render.")
                 lay_out("encode")
-                render_status = gr.Markdown()
 
         control_widgets = [widgets[key] for key in control_keys]
         live_widgets = [widgets[k.key] for k in KNOBS if k.live]

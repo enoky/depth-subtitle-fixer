@@ -226,3 +226,37 @@ def test_a_failed_render_reports_instead_of_raising(monkeypatch, tmp_path):
     message = render_clip(str(tmp_path / "out"), 0,
                           *[values[k.key] for k in KNOBS])
     assert "Render failed" in message and "codec went missing" in message
+
+
+def test_the_render_status_sits_above_the_encoding_panel():
+    """Gradio draws the progress bar over the output component, so where that component
+    lives decides whether the bar is visible.
+
+    Below the Encoding panel it lands off the bottom of a tall page - the bar was updating
+    correctly and was still no use, which is indistinguishable from having none.
+    """
+    from dsf.ui import Session, build_app
+
+    demo = build_app(Session(), native_dialogs=False)
+    blocks = list(demo.blocks.values())
+
+    status = next(b for b in blocks
+                  if type(b).__name__ == "Markdown"
+                  and "Ready to render" in str(getattr(b, "value", "")))
+    encoder = next(b for b in blocks
+                   if type(b).__name__ == "Radio"
+                   and list(getattr(b, "choices", []) or []) and
+                   any("libx265" in str(c) for c in b.choices))
+    # Components are numbered in creation order, so this is layout order.
+    assert status._id < encoder._id, \
+        "the render status must be laid out before the Encoding panel, not after it"
+
+
+def test_the_render_status_is_never_empty():
+    """An empty Markdown collapses to no height, leaving the bar nowhere to draw."""
+    from dsf.ui import Session, build_app
+
+    demo = build_app(Session(), native_dialogs=False)
+    status = [b for b in demo.blocks.values()
+              if type(b).__name__ == "Markdown" and "Ready to render" in str(getattr(b, "value", ""))]
+    assert status, "the status component should start with placeholder text"
