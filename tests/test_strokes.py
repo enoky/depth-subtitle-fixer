@@ -42,12 +42,17 @@ def test_extracted_alpha_covers_the_glyphs_and_spares_the_background():
     assert false_positive < 0.05, f"{false_positive:.1%} of the background leaked in"
 
 
-def test_mask_reaches_the_outline_not_just_the_stroke_core():
-    """The dark rim is part of the overlay; leaving it unmasked leaves bad depth behind."""
+def test_mask_reaches_the_outline_when_rim_growth_is_enabled():
+    """The dark rim is part of the overlay, so growing into it is right for outlined text.
+
+    Opt-in rather than default: on the soft drop shadow that title cards usually carry, the
+    same growth crusts every glyph with speckle.
+    """
     bg = gradient_background(640, 360)
     frame, fill, full = draw_subtitle_full(bg, "HELLO WORLD", font_size=36)
     x0, y0, x1, y1 = text_bbox(fill)
-    patch = _extract(frame, (x0 - 6, y0 - 6, x1 + 6, y1 + 6))
+    patch = _extract(frame, (x0 - 6, y0 - 6, x1 + 6, y1 + 6),
+                     StrokeConfig(rim_expand=3))
     alpha = compose_alpha([patch], 360, 640)
 
     rim = (full > 0) & (fill == 0)
@@ -265,3 +270,71 @@ def test_mask_strength_follows_the_fade():
         assert abs(measured - opacity) < 0.15, \
             f"opacity {opacity} came back as {measured:.2f}; masks: {levels}"
     assert levels[0.4] < levels[0.7] < levels[1.0]
+
+
+def _shadowed_text(offset=(6, 6)):
+    """White text with a soft drop shadow, the way a title card is usually built."""
+    from PIL import Image, ImageDraw, ImageFilter
+
+    from conftest import load_font
+
+    w, h = 900, 260
+    base = Image.fromarray(gradient_background(w, h))
+    font = load_font(60)
+    text = "executive producer"
+    shadow = Image.new("L", (w, h), 0)
+    draw = ImageDraw.Draw(shadow)
+    bb = draw.textbbox((0, 0), text, font=font)
+    x, y = (w - (bb[2] - bb[0])) // 2, h // 3
+    draw.text((x + offset[0], y + offset[1]), text, font=font, fill=255)
+    shadow = shadow.filter(ImageFilter.GaussianBlur(4))
+
+    frame = np.array(base).astype(np.float32)
+    frame *= (1.0 - 0.75 * (np.array(shadow).astype(np.float32) / 255.0))[..., None]
+    img = Image.fromarray(np.clip(frame, 0, 255).astype(np.uint8))
+    ImageDraw.Draw(img).text((x, y), text, font=font, fill=(255, 255, 255))
+
+    fill = Image.new("L", (w, h), 0)
+    ImageDraw.Draw(fill).text((x, y), text, font=font, fill=255)
+    return np.array(img), np.array(fill)
+
+
+def test_a_shadowed_glyph_comes_out_with_a_clean_edge():
+    """The reported symptom: speckles crusted around every glyph.
+
+    Growing into the rim is right for a hard drawn outline and wrong for the soft drop
+    shadow a title card usually carries - a shadow thresholds into a ragged region, and
+    following it leaves a crust that survives into the depth map as corroded text. Hence
+    rim_expand defaults to off.
+    """
+    frame, fill = _shadowed_text()
+    x0, y0, x1, y1 = text_bbox(fill)
+    box = (x0 - 8, y0 - 8, x1 + 8, y1 + 8)
+
+    clean = _extract(frame, box)                                  # default: no growth
+    crusted = _extract(frame, box, StrokeConfig(rim_expand=3))    # follow the shadow
+    assert clean is not None and crusted is not None
+
+    def raggedness(alpha):
+        binary = (alpha > 0.5).astype(np.uint8)
+        perimeter = (cv2.morphologyEx(binary, cv2.MORPH_GRADIENT,
+                                      np.ones((3, 3), np.uint8)) > 0).sum()
+        return perimeter / max(np.sqrt(binary.sum()), 1)
+
+    assert raggedness(clean.alpha) < raggedness(crusted.alpha),         "following a drop shadow should roughen the boundary, which is why it is off"
+
+    alpha = compose_alpha([clean], frame.shape[0], frame.shape[1])
+    assert float((alpha[fill > 200] > 0.5).mean()) > 0.85,         "the glyphs themselves must still be covered"
+
+
+def test_growing_into_an_outline_is_available_when_asked_for():
+    """Still the right thing for genuinely outlined text - it just has to be opted into."""
+    bg = gradient_background(900, 300)
+    frame, fill, full = draw_subtitle_full(bg, "HELLO WORLD", font_size=52, stroke=4)
+    x0, y0, x1, y1 = text_bbox(fill)
+    box = (x0 - 8, y0 - 8, x1 + 8, y1 + 8)
+
+    off = compose_alpha([_extract(frame, box)], 300, 900)
+    on = compose_alpha([_extract(frame, box, StrokeConfig(rim_expand=3))], 300, 900)
+    rim = (full > 0) & (fill == 0)
+    assert float((on[rim] > 0.5).mean()) > float((off[rim] > 0.5).mean()) + 0.15,         "rim_expand should measurably pull the drawn outline into the mask"

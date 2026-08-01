@@ -100,7 +100,8 @@ def add_detect_args(p: argparse.ArgumentParser) -> None:
     g.add_argument("--luma-tol", type=float,
                    help="colour tolerance when following a glyph's outline (fill uses opacity)")
     g.add_argument("--rim-expand", type=int,
-                   help="px the mask grows from the glyph core into its outline (default 3)")
+                   help="px to grow the mask into a hard drawn outline (default 0; raise it "
+                        "for outlined subtitles, leave it off for shadowed credits)")
     g.add_argument("--temporal", choices=("median", "max", "none"),
                    help="temporal mask filter")
     g.add_argument("--temporal-window", type=int, help="frames in the temporal filter")

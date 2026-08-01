@@ -176,12 +176,14 @@ class CropStats:
 
 
 def _expand_into_rim(core: np.ndarray, rim: np.ndarray, iterations: int) -> np.ndarray:
-    """Geodesic dilation of the glyph core into its own outline.
+    """Geodesic dilation of the glyph core into a hard outline drawn around it.
 
-    The ramp deliberately cuts off at the stroke, which also clips the rim the glyphs are
-    drawn with. That rim is part of the burned-in text and DepthCrafter gets its depth just
-    as wrong, so grow into it - but only into rim pixels, and only a few steps, so nothing
-    can run away into the picture.
+    Off by default, because it is only safe when the text really has a drawn outline. Title
+    cards more often carry a soft drop shadow, and a shadow thresholds into a ragged region:
+    growing into that crusts every glyph with speckle, which survives into the depth map as
+    corroded-looking text. The heal step already repairs the depth around the strokes, so the
+    outline's corruption is dealt with either way - following it only sharpens the result
+    when the outline is genuinely hard-edged.
     """
     if iterations <= 0 or not rim.any() or not core.any():
         return core

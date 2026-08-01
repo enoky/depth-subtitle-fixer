@@ -101,8 +101,10 @@ class StrokeConfig:
     enclosure_margin: float = 0.15
     #: and how much must actually be contained for the test to count as evidence at all
     enclosure_min: float = 0.50
-    #: how far the mask grows from the glyph core into the surrounding outline, in px
-    rim_expand: int = 3
+    #: px the mask grows from the glyph core into a hard drawn outline. Off by default:
+    #: it is only safe when the outline really is hard-edged, and growing into the soft drop
+    #: shadow that title cards usually carry leaves a speckled crust on every glyph.
+    rim_expand: int = 0
 
 
 @dataclass(frozen=True)
