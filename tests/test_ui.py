@@ -205,6 +205,40 @@ def test_the_render_result_is_reported_not_handed_back_as_a_file():
     assert "File" not in kinds, "a File output would reintroduce the cache-copy failure"
 
 
+def test_load_always_repoints_the_output_at_the_pair_just_loaded(tmp_path):
+    """Otherwise the previous clip's path survives into the next one.
+
+    It renders to the wrong place under a name claiming to be the reel you just finished,
+    and the first sign of it is an overwritten file.
+    """
+    from dsf.filedialog import suggest_output
+    from dsf.ui import Session, build_app
+
+    session = Session()
+    session.load = lambda rgb, depth: "loaded"
+    rgb, depth = tmp_path / "reel2.mp4", tmp_path / "reel2_depth.mp4"
+    for path in (rgb, depth):
+        path.write_bytes(b"")
+
+    demo = build_app(session, native_dialogs=False)
+    on_load = _named(demo, "on_load")[0].fn
+
+    stale = str(tmp_path / "reel1_depth_fixed.mp4")
+    _, _, out = on_load(str(rgb), str(depth), stale)
+    assert out == suggest_output(str(depth))
+    assert out != stale
+
+
+def test_a_half_filled_load_leaves_the_output_box_alone(tmp_path):
+    """Nothing was loaded, so there is nothing to name the output after."""
+    from dsf.ui import Session, build_app
+
+    demo = build_app(Session(), native_dialogs=False)
+    on_load = _named(demo, "on_load")[0].fn
+    typed = str(tmp_path / "chosen.mp4")
+    assert on_load("", "", typed)[2] == typed
+
+
 def test_a_failed_render_reports_instead_of_raising(monkeypatch, tmp_path):
     """A bad render should say so in the app rather than surfacing a raw traceback."""
     import dsf.pipeline as pipeline

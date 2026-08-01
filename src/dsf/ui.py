@@ -159,9 +159,11 @@ def build_app(session: "Session | None" = None, native_dialogs: bool = True):
         if not rgb_file or not depth_file:
             return ("Select both an RGB clip and its depth map.", gr.update(), out_current)
         info = session.load(rgb_file, depth_file)
-        # Fill the output box once we know what we are working on, so Render is one click.
-        out_value = out_current or suggest_output(depth_file)
-        return info, gr.update(maximum=session.max_frame(), value=0), out_value
+        # The output box always follows the pair that was just loaded, so Render is one
+        # click. Keeping an existing entry instead leaves the path from the previous clip
+        # sitting there after you load the next one - pointing the render at the wrong
+        # file, under a name that says it belongs to the reel you just finished.
+        return info, gr.update(maximum=session.max_frame(), value=0), suggest_output(depth_file)
 
     def on_profile(profile):
         """Switching profile resets the controls to that profile's defaults.
