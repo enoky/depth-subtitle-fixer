@@ -86,13 +86,17 @@ class Session:
             self._detector_key = key
         return self.detectors
 
-    def mask_for(self, index: int, cfg: PipelineConfig):
+    def has_mask(self, index: int) -> bool:
+        return index in self.mask_cache
+
+    def mask_for(self, index: int, cfg: PipelineConfig, progress=None):
         """Returns ``(mask_u8, detections)``, cached per frame for instant re-compositing."""
         from .pipeline import masks_for_frames
 
         if index not in self.mask_cache:
             result = masks_for_frames(self.rgb_path, cfg, [index], self.rgb_info,
-                                      detectors=self.get_detectors(cfg))
+                                      detectors=self.get_detectors(cfg),
+                                      progress=progress)
             self.mask_cache[index] = result.get(
                 index, (np.zeros((self.rgb_info.height, self.rgb_info.width), np.uint8), []))
         return self.mask_cache[index]
@@ -178,14 +182,33 @@ def build_app(session: "Session | None" = None, native_dialogs: bool = True):
         return brightness_to_code(cfg.composite.brightness, depth_info.bit_depth,
                                   resolve_range(cfg.composite, depth_info.color_range))
 
-    def render_frame(index, recompute, *values):
+    def render_frame(index, recompute, *values, progress=gr.Progress()):
         if session.rgb_path is None:
             return None, "Load a clip pair first."
+        from .pipeline import context_frames
+
         cfg = build_config(dict(zip(control_keys, values)))
         index = int(index)
         if recompute:
             session.invalidate_masks()
-        mask_u8, detections = session.mask_for(index, cfg)
+
+        # Asking for one frame is never one frame's work - the persistence and temporal
+        # gates need the frames either side - so the bar counts those, and says which stage
+        # it is in. The first run also has to load the models, which is the longest silence
+        # of all if nothing says so.
+        tick = None
+        if not session.has_mask(index):
+            if session.detectors is None:
+                progress(0.02, desc="loading detection models (first run fetches weights)")
+                session.get_detectors(cfg)
+            total = context_frames(cfg, index)
+
+            def tick(done: int) -> None:  # noqa: F811 - deliberately shadowing the None
+                progress(min(0.90, 0.05 + 0.85 * done / total),
+                         desc=f"detecting text — frame {done} of {total}")
+
+        mask_u8, detections = session.mask_for(index, cfg, progress=tick)
+        progress(0.95, desc="compositing depth")
         rgb = session.rgb_for(index)
         depth_y = session.depth_for(index)
         alpha_rgb = from_u8(mask_u8)
@@ -227,8 +250,10 @@ def build_app(session: "Session | None" = None, native_dialogs: bool = True):
 
         def tick(n: int) -> None:
             if total:
-                progress(min(1.0, n / total), desc=f"{n}/{total} frames")
+                progress(min(1.0, n / total), desc=f"rendering — frame {n} of {total}")
 
+        progress(0.0, desc="loading detection models" if session.detectors is None
+                 else "starting")
         try:
             result = run_fix(session.rgb_path, session.depth_path, out, cfg,
                              max_frames=limit, on_render=tick)

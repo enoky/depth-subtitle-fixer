@@ -275,9 +275,26 @@ def sample_depth(depth_path: str, indices: Sequence[int],
     return out
 
 
+def context_radius(cfg: PipelineConfig) -> int:
+    """How far either side of a frame the gates need to see."""
+    return max(cfg.filters.persist_window // 2, cfg.temporal.window // 2, 1)
+
+
+def context_frames(cfg: PipelineConfig, index: int) -> int:
+    """How many frames must be run to produce the mask for a single *index*.
+
+    Asking for one frame is never one frame's work - the persistence and temporal gates
+    need the frames around it - so a caller showing progress needs this to mean anything.
+    """
+    radius = context_radius(cfg)
+    start = max(0, index - radius)
+    return (index - start) + radius + 1
+
+
 def masks_for_frames(rgb_path: str, cfg: PipelineConfig, indices: Sequence[int],
                      info: VideoInfo | None = None,
-                     detectors: Sequence | None = None
+                     detectors: Sequence | None = None,
+                     progress: ProgressFn | None = None
                      ) -> dict[int, tuple[np.ndarray, list[Detection]]]:
     """Compute ``(mask, detections)`` for a handful of specific frames.
 
@@ -285,13 +302,14 @@ def masks_for_frames(rgb_path: str, cfg: PipelineConfig, indices: Sequence[int],
     persistence and temporal gates behave the same as they would in a full render.
     """
     info = info or probe(rgb_path)
-    radius = max(cfg.filters.persist_window // 2, cfg.temporal.window // 2, 1)
+    radius = context_radius(cfg)
     out: dict[int, tuple[np.ndarray, list[Detection]]] = {}
     for idx in sorted(set(int(i) for i in indices if i >= 0)):
         start = max(0, idx - radius)
         count = (idx - start) + radius + 1
         frames = list(iter_masks_detailed(rgb_path, cfg, info, seek_frame=start,
-                                          max_frames=count, detectors=detectors))
+                                          max_frames=count, detectors=detectors,
+                                          progress=progress))
         pos = idx - start
         out[idx] = frames[pos] if pos < len(frames) else \
             (np.zeros((info.height, info.width), np.uint8), [])
