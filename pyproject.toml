@@ -1,0 +1,43 @@
+[build-system]
+requires = ["setuptools>=68", "wheel"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "depth-subtitle-fixer"
+version = "0.1.0"
+description = "Fix DepthCrafter depth maps corrupted by burned-in subtitles or overlaid credits"
+readme = "README.md"
+requires-python = ">=3.10"
+license = { file = "LICENSE" }
+authors = [{ name = "enoky" }]
+keywords = ["depth", "depthcrafter", "subtitles", "ocr", "stereo", "3d"]
+
+dependencies = [
+    # torch/torchvision are installed separately from the CUDA index (see scripts/setup.ps1);
+    # they are declared here so a plain `pip install -e .` still resolves.
+    "torch>=2.4",
+    "torchvision>=0.19",
+    "python-doctr>=1.0.1",
+    "easyocr>=1.7.2",
+    "opencv-python-headless>=4.10",
+    "scipy>=1.14",
+    "scikit-image>=0.24",
+    "numpy>=2.1",
+    "pillow>=10",
+    "rich>=13",
+    "imageio-ffmpeg>=0.5",
+]
+
+[project.optional-dependencies]
+ui = ["gradio>=6.0"]
+dev = ["pytest>=8"]
+
+[project.scripts]
+dsf = "dsf.cli:main"
+
+[tool.setuptools.packages.find]
+where = ["src"]
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]
+addopts = "-q"
