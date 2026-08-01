@@ -40,6 +40,7 @@ ARG_MAP: list[tuple[str, str, str]] = [
     ("min_cc_area", "strokes", "min_cc_area"),
     ("max_stroke", "strokes", "max_stroke"),
     ("min_response", "strokes", "min_response"),
+    ("min_relative_strength", "strokes", "min_relative_strength"),
     ("background_scale", "strokes", "background_scale"),
     ("luma_tol", "strokes", "luma_tol"),
     ("rim_expand", "strokes", "rim_expand"),
@@ -94,6 +95,9 @@ def add_detect_args(p: argparse.ArgumentParser) -> None:
                    help="floor for the stroke-thickness cap in px (it also scales with text size)")
     g.add_argument("--min-response", type=float,
                    help="minimum stroke contrast for a box to count as text (default 0.05)")
+    g.add_argument("--min-relative-strength", type=float,
+                   help="how strong a blob must be next to the strongest text in the same "
+                        "box (default 0.75); lower it if faint text is being dropped")
     g.add_argument("--background-scale", type=float,
                    help="background window as a fraction of text height; raise it if heavy "
                         "or bold text comes back hollow (default 0.9)")

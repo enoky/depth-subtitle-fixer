@@ -338,3 +338,74 @@ def test_growing_into_an_outline_is_available_when_asked_for():
     on = compose_alpha([_extract(frame, box, StrokeConfig(rim_expand=3))], 300, 900)
     rim = (full > 0) & (fill == 0)
     assert float((on[rim] > 0.5).mean()) > float((off[rim] > 0.5).mean()) + 0.15,         "rim_expand should measurably pull the drawn outline into the mask"
+
+
+def _fading_text_over_detail(opacity):
+    """A credit part-way through a fade, over a scene with bright detail beside it."""
+    from PIL import Image, ImageDraw
+
+    from conftest import load_font
+
+    w, h = 900, 300
+    rng = np.random.default_rng(11)
+    scene = cv2.resize(rng.normal(0, 1, (h // 20, w // 20)).astype(np.float32), (w, h),
+                       interpolation=cv2.INTER_CUBIC)
+    scene = (scene - scene.min()) / (np.ptp(scene) + 1e-6)
+    base = np.stack([scene * 90 + 40] * 3, -1).astype(np.uint8)
+    # A lit edge next to the text - the kind of thing a faint fade amplifies into speckle.
+    cv2.rectangle(base, (760, 120), (774, 210), (215, 215, 215), -1)
+    base = cv2.GaussianBlur(base, (0, 0), 1.2)
+
+    font = load_font(56)
+    text = "executive producer"
+    canvas = Image.fromarray(base).convert("RGBA")
+    layer = Image.new("RGBA", (w, h), (0, 0, 0, 0))
+    draw = ImageDraw.Draw(layer)
+    bb = draw.textbbox((0, 0), text, font=font)
+    x, y = 60, 130
+    draw.text((x, y), text, font=font, fill=(255, 255, 255, int(round(255 * opacity))))
+    frame = np.array(Image.alpha_composite(canvas, layer).convert("RGB"))
+
+    cover = Image.new("L", (w, h), 0)
+    ImageDraw.Draw(cover).text((x, y), text, font=font, fill=255)
+    box = (x - 10, y - 10, x + (bb[2] - bb[0]) + 200, y + (bb[3] - bb[1]) + 10)
+    return frame, np.array(cover), box
+
+
+def test_a_fade_does_not_drag_scene_detail_into_the_mask():
+    """The reported symptom: specks appearing *outside* the glyphs during a fade-in.
+
+    The mask is normalised by whatever the text is showing at, so while it is faint the
+    divisor is small and everything else in the frame is amplified with it - a lit edge
+    behind the credit crosses the threshold and lands in the mask as a speck.
+    """
+    frame, cover, box = _fading_text_over_detail(0.45)
+    gated = _extract(frame, box)
+    ungated = _extract(frame, box, StrokeConfig(min_relative_strength=0.0))
+    assert gated is not None and ungated is not None
+
+    h, w = frame.shape[:2]
+    text_area = cv2.dilate((cover > 0).astype(np.uint8), np.ones((9, 9), np.uint8)).astype(bool)
+
+    def off_text(patch):
+        alpha = compose_alpha([patch], h, w)
+        level = max(float(alpha.max()), 1e-6)
+        return int(((alpha > 0.35 * level) & ~text_area).sum())
+
+    assert off_text(gated) < off_text(ungated), \
+        "the strength gate should remove scene detail the fade amplified"
+    # ...without costing the text itself.
+    alpha = compose_alpha([gated], h, w)
+    assert float((alpha[cover > 200] > 0.2).mean()) > 0.85
+
+
+def test_the_strength_gate_keeps_solid_text_intact():
+    """Every glyph of a credit shares one opacity, so none of them should be near the gate."""
+    bg = gradient_background(900, 300)
+    frame, fill, _ = draw_subtitle_full(bg, "HELLO WORLD", font_size=52, stroke=0,
+                                        outline=(255, 255, 255))
+    x0, y0, x1, y1 = text_bbox(fill)
+    box = (x0 - 8, y0 - 8, x1 + 8, y1 + 8)
+    strict = compose_alpha([_extract(frame, box, StrokeConfig(min_relative_strength=0.9))],
+                           300, 900)
+    assert float((strict[fill > 200] > 0.5).mean()) > 0.85

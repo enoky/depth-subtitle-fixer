@@ -344,7 +344,7 @@ def extract_patch(frame: np.ndarray, det: Detection,
     if not binary.any():
         return None
 
-    kept = _filter_components(binary, cfg, det.height)
+    kept = _filter_components(binary, cfg, det.height, shape=stats.shape)
     if kept is None:
         return None
 
@@ -371,9 +371,19 @@ def stroke_bounds(cfg: StrokeConfig, text_height: float) -> tuple[float, float]:
     return cfg.min_stroke, max(cfg.max_stroke, cfg.max_stroke_frac * text_height)
 
 
-def _filter_components(binary: np.ndarray, cfg: StrokeConfig,
-                       text_height: float = 0.0) -> np.ndarray | None:
-    """Drop connected components that do not look like glyph strokes."""
+def _filter_components(binary: np.ndarray, cfg: StrokeConfig, text_height: float = 0.0,
+                       shape: np.ndarray | None = None) -> np.ndarray | None:
+    """Drop connected components that do not look like glyph strokes.
+
+    One of the tests is about strength rather than form: a credit fades as a whole, so every
+    glyph in it shares one opacity, and ``shape`` is normalised so that opacity reads as 1.
+    A blob markedly fainter than that is not part of the same text.
+
+    This matters most part-way through a fade. The normalisation divides by whatever the
+    text is showing at, so while it is faint the divisor is small and everything else in the
+    frame is amplified with it - a lit building edge behind the credit crosses the threshold
+    and lands in the mask as a speck.
+    """
     ch, cw = binary.shape
     crop_area = ch * cw
     min_stroke, max_stroke = stroke_bounds(cfg, text_height)
@@ -396,6 +406,8 @@ def _filter_components(binary: np.ndarray, cfg: StrokeConfig,
             continue
 
         comp = (labels == label)
+        if shape is not None and float(shape[comp].max()) < cfg.min_relative_strength:
+            continue
         sw = _stroke_width(comp)
         if not (min_stroke <= sw <= max_stroke):
             continue

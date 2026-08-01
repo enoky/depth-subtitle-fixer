@@ -92,6 +92,10 @@ class StrokeConfig:
     background_scale: float = 0.90
     #: minimum residual for a crop to contain text at all
     min_response: float = 0.05
+    #: how strong a blob must be relative to the strongest text in the same crop. Text fades
+    #: as a whole so its glyphs all measure ~1.0; scene detail amplified by a faint fade
+    #: measures around half that.
+    min_relative_strength: float = 0.75
     #: how much stronger one sign must be before magnitude alone decides polarity
     polarity_ratio: float = 1.6
     #: how far an outline pixel's luma may drift from the outline's own colour. Only the
