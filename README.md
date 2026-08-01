@@ -196,5 +196,10 @@ Add `--runslow` to include the end-to-end tests, which need the model weights. T
 build their own synthetic media, so nothing external is required.
 
 `tests/test_real_footage.py` additionally runs against a real DepthCrafter pair - a title
-card fading in and out over a moving crowd - and is skipped unless the frames are present.
-Point `DSF_REAL_FOOTAGE` at a folder containing `rgb_png/` and `depth_png/` to enable it.
+card fading in and out over a moving crowd - and is skipped unless frames are available. To
+enable it, supply a folder containing `rgb_png/` and `depth_png/` either at
+`samples/real_footage/` (`samples/` is git-ignored) or via an environment variable:
+
+```bash
+DSF_REAL_FOOTAGE=/path/to/footage .venv/Scripts/python -m pytest tests/test_real_footage.py --runslow
+```

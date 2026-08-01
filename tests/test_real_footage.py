@@ -1,10 +1,18 @@
 """Regression tests against a real DepthCrafter pair, if one is present.
 
 A synthetic credit can be made to look however the author expects. These run on actual
-frames - a title card fading in and out over a moving crowd - and are skipped when the
-footage is not on this machine.
+frames - a title card fading in and out over a moving crowd - and are skipped when no
+footage is available.
 
-Point DSF_REAL_FOOTAGE at a folder holding ``rgb_png/`` and ``depth_png/``.
+Supply a folder holding ``rgb_png/`` and ``depth_png/`` either by dropping it at
+``samples/real_footage/`` (``samples/`` is git-ignored) or by pointing the environment
+variable ``DSF_REAL_FOOTAGE`` at it:
+
+    DSF_REAL_FOOTAGE=/path/to/footage pytest tests/test_real_footage.py --runslow
+
+The clip these were written against is 71 frames of 1920x800 8-bit PNG. Anything with a
+credit that fades in and out will exercise the same paths, though the frame indices and the
+band below are specific to that clip.
 """
 
 from __future__ import annotations
@@ -17,13 +25,18 @@ import cv2
 import numpy as np
 import pytest
 
-ROOT = Path(os.environ.get("DSF_REAL_FOOTAGE", r"F:\_3D_Test_\depth_sub_fixer"))
+#: The environment variable wins outright when set; otherwise look inside the project.
+_DEFAULT = Path(__file__).resolve().parents[1] / "samples" / "real_footage"
+ROOT = Path(os.environ["DSF_REAL_FOOTAGE"]) if os.environ.get("DSF_REAL_FOOTAGE") else _DEFAULT
 RGB, DEPTH = ROOT / "rgb_png", ROOT / "depth_png"
 
 pytestmark = [
     pytest.mark.slow,
-    pytest.mark.skipif(not (RGB.is_dir() and DEPTH.is_dir()),
-                       reason=f"no real footage at {ROOT}"),
+    pytest.mark.skipif(
+        not (RGB.is_dir() and DEPTH.is_dir()),
+        reason=(f"no rgb_png/ and depth_png/ under {ROOT} - put them there, or set "
+                f"DSF_REAL_FOOTAGE to a folder that has them"),
+    ),
 ]
 
 # The credit occupies this band; frame 0 of the sequence is before it appears and the last
