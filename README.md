@@ -45,6 +45,18 @@ the depth wrecked and smeared over the subtitles).
 dsf fix --rgb clip.mp4 --depth clip_depth.mp4 --out clip_depth_fixed.mp4 --brightness 0.92
 ```
 
+Folders of frames work anywhere a video does - DepthCrafter is often driven and reviewed as
+stills, so a PNG/TIFF sequence is a first-class input rather than a conversion step. Give an
+output path with no extension and the frames come back with their original filenames, bit
+depth and channel layout, and every pixel the mask did not touch is byte-identical:
+
+```bash
+dsf fix --rgb ./rgb_png --depth ./depth_png --out ./depth_fixed --profile credits
+```
+
+16-bit PNG depth survives intact - sequences are read straight off disk rather than through
+a video pipeline that would force an 8-bit or YUV round trip.
+
 Check a few frames before committing to a full render:
 
 ```bash
@@ -68,11 +80,24 @@ Or tune interactively with a frame scrubber and live sliders:
 dsf ui
 ```
 
+The app exposes **every** setting the command line does - the everyday ones up front, the
+rest under *Detection — advanced*, *Glyph extraction — advanced* and *Encoding*. A test
+compares the two lists, so a flag cannot exist in one and go missing from the other.
+Switching profile resets the controls to that preset's defaults, and anything you change
+afterwards applies on top, exactly as an explicit flag overrides a profile on the CLI.
+
+The **Browse…** buttons open a normal OS file dialog and hand back the path - nothing is
+copied, so picking a two-hour 4K master costs nothing. Choosing any frame inside a folder
+selects that folder, since a file dialog cannot pick one. The output path fills itself in
+next to the source when you hit Load. Browse needs `tkinter` and is disabled behind
+`--share`, since the dialog would open on the machine running the server rather than the
+viewer's; paths can always be pasted instead.
+
 ## Commands
 
 | Command | What it does |
 |---|---|
-| `dsf probe <video>` | resolution, pix_fmt, bit depth, fps, frame count, colour tags |
+| `dsf probe <video\|folder>` | resolution, pix_fmt, bit depth, fps, frame count, colour tags |
 | `dsf detect` | detect text, write a mask cache |
 | `dsf render` | composite a cached mask onto the depth map |
 | `dsf fix` | detect + composite in one streaming pass |
@@ -95,6 +120,12 @@ dsf ui
 - `--scene-text keep|mask` - `keep` (default) leaves filmed text such as shop signs and
   licence plates with its real depth; `mask` masks everything found
 - `--detect-every N` - detect every Nth frame and propagate between (static text only)
+- `--min-response` - minimum stroke contrast for a box to count as text at all
+- `--background-scale` - the background window as a fraction of text height. It must span
+  roughly a whole letter; raise it if heavy or bold text comes back hollow
+- `--luma-tol` - colour tolerance when following a glyph's outline (the fill is found by
+  opacity, which is what makes fades work)
+- `--polarity auto|light|dark` - override if a clip's text is consistently mis-read
 
 **Repairing the depth**
 
@@ -113,13 +144,33 @@ dsf ui
 2. **Filter** - detections must sit in the ROI, be a plausible text size, be high-contrast
    and flat-coloured, and persist across several frames. This is what keeps in-scene text
    intact.
-3. **Extract strokes** - inside each box, a 3-class split separates outline / background /
-   glyph, and connected components are filtered by area, stroke width and whether they carry
-   a dark rim. The mask then grows from the glyph core into that rim (`--rim-expand`): the
-   outline is part of the burned-in overlay and its depth is corrupted too. The result is a
-   *soft* alpha - hard edges ring after stereo warping.
+3. **Extract strokes** - inside each box, a median over a window wider than a stroke
+   estimates the picture *without* the writing, and the text is read off as the difference.
+   Because a pixel where text of colour `T` covers background `B` at opacity `a` reads back
+   as `a*T + (1-a)*B`, that difference is exactly `a*(T-B)` - so dividing by `(T-B)` returns
+   the text's opacity directly, whatever the shot is doing behind it. Components are then
+   filtered by area and by a stroke width that scales with the text size, and the mask grows
+   from the glyph core into its outline (`--rim-expand`), since the outline is part of the
+   overlay and its depth is corrupted too.
+
+   Two failures this avoids. Thresholding raw luminance does not survive a detection box
+   that straddles a lighting boundary - the threshold ends up describing the *background*
+   rather than separating text from it, and whichever word sits over the brighter half is
+   silently dropped. And testing whether each pixel matches the colour of the other strokes
+   only holds while the text is opaque: the moment a credit fades, every pixel is part
+   background, one glyph reads as many shades, and the mask comes back shredded.
+
+   Working in opacity also gives the right answer for free - a credit at 30% opacity yields
+   a 30% mask, so the depth is pushed 30% of the way and the text eases in instead of
+   snapping. Below roughly 25% opacity a faded credit is quieter than the scene's own detail
+   at stroke scale, and no single-frame method can recover it; `--temporal max` borrows from
+   neighbouring frames there.
 4. **Smooth** - a temporal median (or max, for credits) across a small window kills detector
-   flicker.
+   flicker. It is applied to the stroke *shape* only, and each frame is then scaled by the
+   opacity it measured for itself. Smoothing the finished mask instead would drag a fading
+   credit up to its neighbours' strength, so the frame after a fade-out ended - nothing
+   detected on it at all - would still get a near-solid mask stamped into depth that was
+   never corrupted.
 5. **Composite** - heal the corrupted depth in a halo around the strokes from the nearest
    valid depth, then alpha-blend the glyphs at the requested code value.
 
@@ -141,5 +192,9 @@ mask - no colour-range rescale, no 8-bit round trip.
 .venv/Scripts/python -m pytest
 ```
 
-Add `--runslow` to include the end-to-end tests, which need the model weights. All tests
-build their own synthetic media; no sample files are required.
+Add `--runslow` to include the end-to-end tests, which need the model weights. The tests
+build their own synthetic media, so nothing external is required.
+
+`tests/test_real_footage.py` additionally runs against a real DepthCrafter pair - a title
+card fading in and out over a moving crowd - and is skipped unless the frames are present.
+Point `DSF_REAL_FOOTAGE` at a folder containing `rgb_png/` and `depth_png/` to enable it.

@@ -39,7 +39,9 @@ ARG_MAP: list[tuple[str, str, str]] = [
     ("polarity", "strokes", "polarity"),
     ("min_cc_area", "strokes", "min_cc_area"),
     ("max_stroke", "strokes", "max_stroke"),
-    ("outline_check", "strokes", "outline_check"),
+    ("min_response", "strokes", "min_response"),
+    ("background_scale", "strokes", "background_scale"),
+    ("luma_tol", "strokes", "luma_tol"),
     ("rim_expand", "strokes", "rim_expand"),
     ("temporal", "temporal", "mode"),
     ("temporal_window", "temporal", "window"),
@@ -88,9 +90,15 @@ def add_detect_args(p: argparse.ArgumentParser) -> None:
     g.add_argument("--polarity", choices=("auto", "light", "dark"),
                    help="are the glyphs brighter or darker than their background")
     g.add_argument("--min-cc-area", type=int, help="drop connected components below this area")
-    g.add_argument("--max-stroke", type=float, help="drop components thicker than this (px)")
-    g.add_argument("--no-outline-check", dest="outline_check", action="store_false",
-                   default=None, help="do not require a dark outline around each glyph")
+    g.add_argument("--max-stroke", type=float,
+                   help="floor for the stroke-thickness cap in px (it also scales with text size)")
+    g.add_argument("--min-response", type=float,
+                   help="minimum stroke contrast for a box to count as text (default 0.05)")
+    g.add_argument("--background-scale", type=float,
+                   help="background window as a fraction of text height; raise it if heavy "
+                        "or bold text comes back hollow (default 0.9)")
+    g.add_argument("--luma-tol", type=float,
+                   help="colour tolerance when following a glyph's outline (fill uses opacity)")
     g.add_argument("--rim-expand", type=int,
                    help="px the mask grows from the glyph core into its outline (default 3)")
     g.add_argument("--temporal", choices=("median", "max", "none"),
@@ -173,7 +181,7 @@ def cmd_probe(args) -> int:
     from rich.console import Console
     from rich.table import Table
 
-    from .videoio import probe
+    from .media import probe
 
     console = Console()
     for path in args.videos:
@@ -186,6 +194,7 @@ def cmd_probe(args) -> int:
             ("decode as", info.decode_pix_fmt),
             ("fps", f"{float(info.fps):.6f}"),
             ("frames", f"{info.nb_frames}{'' if info.frames_exact else ' (estimated)'}"),
+            ("kind", "image sequence" if info.codec_name == "imageseq" else "video"),
             ("colour range", info.color_range),
             ("primaries/transfer/matrix",
              f"{info.color_primaries or '-'} / {info.color_transfer or '-'} / "
@@ -198,8 +207,8 @@ def cmd_probe(args) -> int:
 
 def cmd_detect(args) -> int:
     from .maskcache import MaskCacheWriter
+    from .media import probe
     from .pipeline import iter_masks
-    from .videoio import probe
 
     cfg = build_config(args)
     info = probe(args.rgb)
@@ -216,8 +225,8 @@ def cmd_detect(args) -> int:
 
 def cmd_render(args) -> int:
     from .maskcache import read_masks
+    from .media import probe
     from .pipeline import render_from_masks
-    from .videoio import probe
 
     cfg = build_config(args)
     depth_info = probe(args.depth)
@@ -234,8 +243,8 @@ def cmd_render(args) -> int:
 
 
 def cmd_fix(args) -> int:
+    from .media import probe
     from .pipeline import run_fix
-    from .videoio import probe
 
     cfg = build_config(args)
     rgb_info, depth_info = probe(args.rgb), probe(args.depth)

@@ -3,21 +3,37 @@
 The expensive step (detection) runs once per frame and is cached in the session, so the
 brightness, dilate, feather and heal controls re-composite the displayed frame instantly.
 The Render button then calls exactly the same code path as `dsf fix`.
+
+Every control is generated from the table in `controls.py`, which the test suite compares
+against the CLI's argument map - so a knob cannot be reachable from the command line and
+quietly missing here.
 """
 
 from __future__ import annotations
 
-import dataclasses
 import tempfile
 from pathlib import Path
 
 import numpy as np
 
 from .composite import composite_frame, resize_alpha
-from .config import PipelineConfig, apply_profile, configure_model_cache
+from .config import PipelineConfig, configure_model_cache
+from .controls import (CONFIG_KNOBS, GROUP_TITLES, KNOBS, build_config, defaults,
+                       group_knobs, make_component, profile_defaults)
+from .filedialog import (collapse_to_sequence, dialogs_available, pick_directory,
+                         pick_open, pick_save, suggest_output)
+from .media import probe
 from .preview import contact_sheet
 from .temporal import from_u8
-from .videoio import probe
+
+#: A Gradio Button is a bare flex child of its Row, while a labelled Textbox is wrapped in a
+#: padded block. Left alone the button therefore floats against the label rather than the
+#: field. Pinning it to the bottom and lifting it by the block's own 10px padding lands it
+#: level with the input it belongs to. equal_height on the Row is not the answer - that
+#: stretches the button to the full height of the tallest thing in the row.
+_CSS = """
+.dsf-browse { align-self: flex-end; margin-bottom: 10px; flex-grow: 0; }
+"""
 
 
 class Session:
@@ -43,9 +59,10 @@ class Session:
         self.frame_cache.clear()
         self.depth_frame_cache.clear()
         notes = check_alignment(self.rgb_info, self.depth_info)
+        kind = "frames" if self.rgb_info.codec_name == "imageseq" else "video"
         lines = [
             f"RGB   {self.rgb_info.width}x{self.rgb_info.height} @ "
-            f"{float(self.rgb_info.fps):.3f} fps, {self.rgb_info.nb_frames} frames",
+            f"{float(self.rgb_info.fps):.3f} fps, {self.rgb_info.nb_frames} {kind}",
             f"depth {self.depth_info.width}x{self.depth_info.height} @ "
             f"{float(self.depth_info.fps):.3f} fps, {self.depth_info.nb_frames} frames, "
             f"{self.depth_info.bit_depth}-bit {self.depth_info.color_range}",
@@ -92,54 +109,74 @@ class Session:
         if index not in self.depth_frame_cache:
             frames = sample_depth(self.depth_path, [index], self.depth_info)
             for k, v in frames.items():
-                self.depth_frame_cache[k] = v.y
+                self.depth_frame_cache[k] = v.plane
         return self.depth_frame_cache[index]
 
     def invalidate_masks(self) -> None:
         self.mask_cache.clear()
 
 
-def _config(profile, detectors, roi, scene_text, detect_every, min_persist,
-            brightness, brightness_mode, dilate, feather, heal, heal_scope,
-            heal_dilate, value_range) -> PipelineConfig:
-    cfg = apply_profile(PipelineConfig(), profile)
-    detect = dataclasses.replace(
-        cfg.detect,
-        detectors=tuple(detectors) if detectors else cfg.detect.detectors,
-        detect_every=int(detect_every),
-    )
-    filters = dataclasses.replace(cfg.filters, roi=roi, scene_text=scene_text,
-                                  min_persist_frames=int(min_persist))
-    composite = dataclasses.replace(
-        cfg.composite, brightness=float(brightness), brightness_mode=brightness_mode,
-        dilate=int(dilate), feather=float(feather), heal=heal, heal_scope=heal_scope,
-        heal_dilate=int(heal_dilate), value_range=value_range,
-    )
-    return dataclasses.replace(cfg, detect=detect, filters=filters, composite=composite)
-
-
-def build_app(session: "Session | None" = None):
+def build_app(session: "Session | None" = None, native_dialogs: bool = True):
     """Construct the Gradio Blocks app. Split out from launch() so it can be built and
-    inspected in tests without binding a port."""
+    inspected in tests without binding a port.
+
+    *native_dialogs* is switched off for shared links: the dialog would open on the machine
+    running the server, not on the viewer's, and block their request until someone here
+    dismissed it.
+    """
     import gradio as gr
 
     configure_model_cache()
     session = session or Session()
+    can_browse = native_dialogs and dialogs_available()
+    start = defaults()
+    widgets: dict[str, object] = {}
+    control_keys = [k.key for k in KNOBS]
 
-    def on_load(rgb_file, depth_file):
+    # ------------------------------------------------------------------ handlers
+
+    def browse_rgb(current):
+        picked = pick_open("Select the RGB clip, or any frame of a sequence", current)
+        return collapse_to_sequence(picked) or current
+
+    def browse_depth(current):
+        picked = pick_open("Select the depth map, or any frame of a sequence", current)
+        return collapse_to_sequence(picked) or current
+
+    def browse_out(current, depth_current):
+        hint = current or suggest_output(depth_current)
+        # Frames in, frames out: a sequence needs a destination folder, not a filename.
+        if depth_current and Path(depth_current).is_dir():
+            return pick_directory("Choose a folder for the corrected frames", hint) or current
+        return pick_save("Save the corrected depth map as", hint) or current
+
+    def on_load(rgb_file, depth_file, out_current):
         if not rgb_file or not depth_file:
-            return "Select both an RGB clip and its depth map.", gr.update()
+            return ("Select both an RGB clip and its depth map.", gr.update(), out_current)
         info = session.load(rgb_file, depth_file)
-        return info, gr.update(maximum=session.max_frame(), value=0)
+        # Fill the output box once we know what we are working on, so Render is one click.
+        out_value = out_current or suggest_output(depth_file)
+        return info, gr.update(maximum=session.max_frame(), value=0), out_value
 
-    def render_frame(index, profile, detectors, roi, scene_text, detect_every, min_persist,
-                     brightness, brightness_mode, dilate, feather, heal, heal_scope,
-                     heal_dilate, value_range, recompute):
+    def on_profile(profile):
+        """Switching profile resets the controls to that profile's defaults.
+
+        Without this the profile would be inert: every widget always holds a value, so the
+        controls would override the preset the instant it was chosen.
+        """
+        wanted = profile_defaults(profile)
+        return [gr.update(value=wanted[k.key]) for k in CONFIG_KNOBS]
+
+    def _painted_code(cfg, depth_info) -> float:
+        from .composite import brightness_to_code, resolve_range
+
+        return brightness_to_code(cfg.composite.brightness, depth_info.bit_depth,
+                                  resolve_range(cfg.composite, depth_info.color_range))
+
+    def render_frame(index, recompute, *values):
         if session.rgb_path is None:
             return None, "Load a clip pair first."
-        cfg = _config(profile, detectors, roi, scene_text, detect_every, min_persist,
-                      brightness, brightness_mode, dilate, feather, heal, heal_scope,
-                      heal_dilate, value_range)
+        cfg = build_config(dict(zip(control_keys, values)))
         index = int(index)
         if recompute:
             session.invalidate_masks()
@@ -155,31 +192,23 @@ def build_app(session: "Session | None" = None):
                               panel_width=560)
         covered = float((alpha_rgb > 0.02).mean()) * 100.0
         stats = (f"frame {index} | mask covers {covered:.2f}% of the frame | "
-                 f"painted code "
+                 f"peak strength {float(alpha_rgb.max()):.2f} | painted code "
                  f"{_painted_code(cfg, session.depth_info):.0f} of "
                  f"{(1 << session.depth_info.bit_depth) - 1}")
         return sheet[..., ::-1], stats  # BGR -> RGB for gradio
 
-    def _painted_code(cfg, depth_info) -> float:
-        from .composite import brightness_to_code, resolve_range
-
-        return brightness_to_code(cfg.composite.brightness, depth_info.bit_depth,
-                                  resolve_range(cfg.composite, depth_info.color_range))
-
-    def render_clip(out_path, profile, detectors, roi, scene_text, detect_every, min_persist,
-                    brightness, brightness_mode, dilate, feather, heal, heal_scope,
-                    heal_dilate, value_range, max_frames, progress=gr.Progress()):
+    def render_clip(out_path, max_frames, *values, progress=gr.Progress()):
         if session.rgb_path is None:
             return "Load a clip pair first.", None
         from .pipeline import run_fix
 
-        cfg = _config(profile, detectors, roi, scene_text, detect_every, min_persist,
-                      brightness, brightness_mode, dilate, feather, heal, heal_scope,
-                      heal_dilate, value_range)
+        cfg = build_config(dict(zip(control_keys, values)))
         out = out_path.strip() if out_path else ""
         if not out:
-            out = str(Path(tempfile.gettempdir()) /
-                      (Path(session.depth_path).stem + "_fixed.mp4"))
+            source = Path(session.depth_path)
+            out = str(Path(tempfile.gettempdir()) / f"{source.stem}_fixed")
+            if not source.is_dir():
+                out += source.suffix or ".mp4"
         total = (int(max_frames) if max_frames else session.max_frame() + 1) or None
 
         def tick(n: int) -> None:
@@ -189,49 +218,62 @@ def build_app(session: "Session | None" = None):
         result = run_fix(session.rgb_path, session.depth_path, out, cfg,
                          max_frames=int(max_frames) if max_frames else None,
                          on_render=tick)
-        return f"Wrote {result['frames']} frames to {out}", out
+        # A folder of frames is not something to hand back as a single download.
+        listing = None if Path(out).is_dir() else out
+        return f"Wrote {result['frames']} frames to {out}", listing
+
+    # ------------------------------------------------------------------- layout
+
+    browse_tip = "" if can_browse else (
+        "  \n*Browse buttons need tkinter, which this Python does not have - paste paths "
+        "instead.*" if native_dialogs else
+        "  \n*Browse buttons are disabled on a shared link: the dialog would open on the "
+        "machine running the server. Paste paths instead.*"
+    )
+
+    def lay_out(group: str) -> None:
+        title, collapsed = GROUP_TITLES[group]
+        knobs = group_knobs(group)
+        if not knobs:
+            return
+        if collapsed:
+            with gr.Accordion(title, open=False):
+                for knob in knobs:
+                    widgets[knob.key] = make_component(gr, knob, start[knob.key])
+        else:
+            gr.Markdown(f"### {title}")
+            for knob in knobs:
+                widgets[knob.key] = make_component(gr, knob, start[knob.key])
 
     with gr.Blocks(title="depth-subtitle-fixer") as demo:
         gr.Markdown(
             "## depth-subtitle-fixer\n"
-            "Load an RGB clip and its DepthCrafter depth map, tune the mask and the painted "
-            "grey level on a single frame, then render the whole clip."
+            "Load an RGB clip and its DepthCrafter depth map - either a video file or a "
+            "folder of frames - tune the mask and the painted grey level on one frame, then "
+            "render the whole clip." + browse_tip
         )
         with gr.Row():
-            rgb_file = gr.Textbox(label="RGB clip (path)", placeholder=r"F:\clips\movie.mp4")
-            depth_file = gr.Textbox(label="Depth map (path)",
-                                    placeholder=r"F:\clips\movie_depth.mp4")
-            load_btn = gr.Button("Load", variant="primary")
+            rgb_file = gr.Textbox(label="RGB clip (file or frame folder)",
+                                  placeholder=r"F:\clips\movie.mp4", scale=8)
+            rgb_browse = gr.Button("Browse…", scale=0, min_width=110,
+                                   elem_classes="dsf-browse", interactive=can_browse)
+            depth_file = gr.Textbox(label="Depth map (file or frame folder)",
+                                    placeholder=r"F:\clips\movie_depth.mp4", scale=8)
+            depth_browse = gr.Button("Browse…", scale=0, min_width=110,
+                                     elem_classes="dsf-browse", interactive=can_browse)
+            load_btn = gr.Button("Load", variant="primary", scale=0, min_width=100,
+                                 elem_classes="dsf-browse")
         info_box = gr.Textbox(label="Streams", lines=4, interactive=False)
 
         with gr.Row():
             with gr.Column(scale=1):
-                gr.Markdown("### Detection")
-                profile = gr.Radio(["subtitles", "credits", "both"], value="subtitles",
-                                   label="Profile")
-                detectors = gr.CheckboxGroup(["doctr", "easyocr"], value=["doctr", "easyocr"],
-                                             label="Detectors")
-                roi = gr.Textbox(value="bottom:0.30", label="ROI",
-                                 info="full | bottom:0.30 | top:0.20 | x0,y0,x1,y1")
-                scene_text = gr.Radio(["keep", "mask"], value="keep",
-                                      label="Text filmed in the scene")
-                detect_every = gr.Slider(1, 8, value=2, step=1, label="Detect every N frames")
-                min_persist = gr.Slider(1, 10, value=3, step=1, label="Min persistence frames")
-                recompute = gr.Checkbox(value=False,
-                                        label="Recompute mask (needed after changing "
-                                              "detection settings)")
-
-                gr.Markdown("### Depth repair")
-                brightness = gr.Slider(0.0, 1.0, value=0.92, step=0.005, label="Brightness")
-                brightness_mode = gr.Radio(["absolute", "relative"], value="absolute",
-                                           label="Brightness mode")
-                dilate = gr.Slider(0, 10, value=2, step=1, label="Dilate (px)")
-                feather = gr.Slider(0.0, 8.0, value=1.5, step=0.1, label="Feather (sigma)")
-                heal = gr.Radio(["edt", "none"], value="edt", label="Heal")
-                heal_scope = gr.Radio(["glyph", "region"], value="glyph", label="Heal scope")
-                heal_dilate = gr.Slider(0, 40, value=6, step=1, label="Heal halo (px)")
-                value_range = gr.Radio(["auto", "tv", "pc"], value="auto",
-                                       label="Luma code range")
+                lay_out("detect")
+                recompute = gr.Checkbox(
+                    value=False,
+                    label="Recompute mask (needed after changing detection settings)")
+                lay_out("detect_adv")
+                lay_out("strokes_adv")
+                lay_out("repair")
 
             with gr.Column(scale=2):
                 frame_idx = gr.Slider(0, 1, value=0, step=1, label="Frame")
@@ -239,31 +281,44 @@ def build_app(session: "Session | None" = None):
                                  type="numpy", height=620)
                 stats = gr.Markdown()
                 with gr.Row():
-                    out_path = gr.Textbox(label="Output path",
-                                          placeholder="leave blank for a temp file")
-                    max_frames = gr.Number(label="Max frames (blank = all)", value=None)
-                    render_btn = gr.Button("Render full clip", variant="primary")
+                    out_path = gr.Textbox(
+                        label="Output path (file, or folder for frames)",
+                        placeholder="leave blank for a temp file", scale=8)
+                    out_browse = gr.Button("Browse…", scale=0, min_width=110,
+                                           elem_classes="dsf-browse", interactive=can_browse)
+                    # Kept to one line: a wrapping label makes this block taller than the
+                    # textbox beside it, and buttons align to the tallest thing in the row.
+                    max_frames = gr.Number(label="Max frames", value=None, scale=2,
+                                           placeholder="all")
+                    render_btn = gr.Button("Render full clip", variant="primary", scale=0,
+                                           min_width=150, elem_classes="dsf-browse")
+                lay_out("encode")
                 render_status = gr.Markdown()
                 render_file = gr.File(label="Result")
 
-        controls = [frame_idx, profile, detectors, roi, scene_text, detect_every, min_persist,
-                    brightness, brightness_mode, dilate, feather, heal, heal_scope,
-                    heal_dilate, value_range, recompute]
+        control_widgets = [widgets[key] for key in control_keys]
+        live_widgets = [widgets[k.key] for k in KNOBS if k.live]
 
-        load_btn.click(on_load, [rgb_file, depth_file], [info_box, frame_idx])
-        for control in controls:
-            control.change(render_frame, controls, [sheet, stats])
+        rgb_browse.click(browse_rgb, rgb_file, rgb_file)
+        depth_browse.click(browse_depth, depth_file, depth_file)
+        out_browse.click(browse_out, [out_path, depth_file], out_path)
+        load_btn.click(on_load, [rgb_file, depth_file, out_path],
+                       [info_box, frame_idx, out_path])
+        widgets["profile"].change(on_profile, widgets["profile"],
+                                  [widgets[k.key] for k in CONFIG_KNOBS])
 
-        render_btn.click(
-            render_clip,
-            [out_path, profile, detectors, roi, scene_text, detect_every, min_persist,
-             brightness, brightness_mode, dilate, feather, heal, heal_scope, heal_dilate,
-             value_range, max_frames],
-            [render_status, render_file],
-        )
+        preview_inputs = [frame_idx, recompute, *control_widgets]
+        for control in [frame_idx, recompute, *live_widgets]:
+            control.change(render_frame, preview_inputs, [sheet, stats])
+
+        render_btn.click(render_clip, [out_path, max_frames, *control_widgets],
+                         [render_status, render_file])
 
     return demo
 
 
 def launch(share: bool = False, port: int = 7860) -> None:
-    build_app().launch(share=share, server_port=port, inbrowser=True)
+    # Gradio 6 takes styling at launch time rather than on the Blocks constructor.
+    build_app(native_dialogs=not share).launch(
+        share=share, server_port=port, inbrowser=True, css=_CSS,
+    )

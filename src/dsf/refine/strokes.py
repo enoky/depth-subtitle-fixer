@@ -4,12 +4,15 @@ A detector box covers a whole text line, including the background between the le
 Stamping that rectangle into the depth map would flatten a big slab of real scene depth, so
 we go one level finer and pull out the strokes themselves.
 
-Burned-in subtitles are built to be legible: bright flat glyphs, a dark outline or drop
-shadow, hard edges. That makes them separable inside the box by luminance alone, which is
-both faster and more precise on thin strokes than asking a general segmenter.
+The method is to estimate the picture *without* the writing - a median over a window wider
+than a stroke - and read the text off as the difference. Dividing that difference by the
+contrast between the text and the estimated background recovers the text's opacity directly,
+which is what makes this survive both a box straddling a lighting boundary and a credit
+part-way through a fade.
 
-The mask is deliberately *soft* - glyph edges are anti-aliased in the source, and a hard
-binary edge stamped into a depth map produces visible ringing after stereo warping.
+The mask is deliberately *soft* - glyph edges are anti-aliased in the source, a fading credit
+is genuinely semi-transparent, and a hard binary edge stamped into a depth map produces
+visible ringing after stereo warping.
 """
 
 from __future__ import annotations
@@ -18,6 +21,7 @@ from dataclasses import dataclass
 
 import cv2
 import numpy as np
+from scipy.ndimage import binary_fill_holes
 
 from ..config import StrokeConfig
 from ..detect.base import Detection
@@ -29,84 +33,155 @@ class AlphaPatch:
 
     x0: int
     y0: int
-    alpha: np.ndarray  # float32 in [0, 1]
+    alpha: np.ndarray  # float32 in [0, 1] - opacity, i.e. how strongly the text is showing
     det: Detection
+    level: float = 1.0  # the opacity its strokes peak at; < 1 mid-fade
 
     @property
     def shape(self) -> tuple[int, int]:
         return self.alpha.shape[:2]
 
+    @property
+    def normalised(self) -> np.ndarray:
+        """The stroke shape with the fade divided out, so strokes read as 1."""
+        if self.level <= 1e-6:
+            return self.alpha
+        return np.clip(self.alpha / self.level, 0.0, 1.0)
+
 
 _K3 = cv2.getStructuringElement(cv2.MORPH_ELLIPSE, (3, 3))
 
 
-def _otsu_split(lum: np.ndarray) -> tuple[float, float, float]:
-    """Otsu threshold on a [0,1] luma crop -> (threshold, dark mean, bright mean)."""
-    u8 = np.clip(lum * 255.0, 0, 255).astype(np.uint8)
+def _otsu(values: np.ndarray) -> float:
+    """Otsu threshold on an arbitrary float array, returned in the array's own units."""
+    finite = values[np.isfinite(values)]
+    if finite.size == 0:
+        return 0.0
+    peak = float(finite.max())
+    if peak <= 1e-6:
+        return 0.0
+    u8 = np.clip(finite / peak * 255.0, 0, 255).astype(np.uint8)
     thresh, _ = cv2.threshold(u8, 0, 255, cv2.THRESH_BINARY + cv2.THRESH_OTSU)
-    t = float(thresh) / 255.0
-    dark, bright = lum[lum <= t], lum[lum > t]
-    dark_mean = float(dark.mean()) if dark.size else 0.0
-    bright_mean = float(bright.mean()) if bright.size else 1.0
-    return t, dark_mean, bright_mean
+    return float(thresh) / 255.0 * peak
 
 
-def _three_way_split(lum: np.ndarray) -> tuple[float, float]:
-    """Two thresholds separating outline / background / glyph.
+def estimate_background(lum: np.ndarray, k: int) -> np.ndarray:
+    """What the picture would look like with the writing taken off it.
 
-    A plain two-class Otsu is the wrong tool here. A subtitle crop has *three* populations -
-    the dark outline, the video behind it, and the bright glyph fill - and Otsu habitually
-    puts the cut between the outline and everything else, which makes the glyphs look like
-    part of the majority class and flips the polarity decision.
+    A median over a window a whole letter across: the writing is a minority of any such
+    window, so it is voted away and what remains is the scene behind it. Sizing the window
+    off a stroke rather than a letter is not enough - a bold stroke then fills more than half
+    of it, wins its own median, and its interior is reported as background.
+
+    A morphological opening is the textbook choice here and is wrong for this job. Opening
+    takes the local *minimum*, so a glyph's dark outline drags the estimate down across a
+    whole neighbourhood, and the ordinary picture around the text then reads as signal - a
+    bright halo hugging every word. A median does not care which side a thin structure is
+    on, so outline and fill are both simply outvoted.
     """
-    from skimage.filters import threshold_multiotsu
-
-    try:
-        t1, t2 = threshold_multiotsu(lum, classes=3, nbins=256)
-        return float(t1), float(t2)
-    except (ValueError, RuntimeError):
-        t, _, _ = _otsu_split(lum)  # degenerate crop (flat, or only two levels)
-        return t, t
+    k = max(3, int(k) | 1)
+    u8 = np.clip(lum * 255.0, 0, 255).astype(np.uint8)
+    return cv2.medianBlur(u8, k).astype(np.float32) / 255.0
 
 
-def _enclosure(core: np.ndarray, other: np.ndarray, background: np.ndarray) -> float:
-    """How completely *other* wraps *core*, penalised by background leaking into the rim.
+def _residual_pair(lum: np.ndarray, k: int) -> tuple[np.ndarray, np.ndarray, np.ndarray]:
+    """(brighter-than-background, darker-than-background, the background itself)."""
+    background = estimate_background(lum, k)
+    difference = lum - background
+    return (np.clip(difference, 0.0, None), np.clip(-difference, 0.0, None), background)
 
-    This is the one asymmetry that separates a glyph from its own outline. The fill is
-    sealed inside the outline, so its rim is outline and nothing else. The outline is a
-    loop: its inner rim is fill but its outer rim is the video behind it, so background
-    shows up and drags the score down.
 
-    Comparing raw luma distances instead would be worse than useless - a black outline is
-    always further from a mid-grey background than white text is, so the outline would win
-    every time.
+def _core(signal: np.ndarray) -> np.ndarray:
+    """Everything the residual picked out, across the whole crop."""
+    thresh = _otsu(signal)
+    core = signal > thresh
+    return core if int(core.sum()) >= 8 else np.zeros(signal.shape, bool)
+
+
+def _centres(signal: np.ndarray) -> np.ndarray:
+    """The strongest fifth of a residual - the middles of whatever it found."""
+    core = _core(signal)
+    if not core.any():
+        return core
+    return signal >= np.percentile(signal[core], 80)
+
+
+def _colour_spread(lum: np.ndarray, signal: np.ndarray, core: np.ndarray) -> float:
+    """How much the luma varies from one picked-out blob to the next.
+
+    Burned-in text is one flat colour everywhere it appears. The gaps *between* its strokes
+    are not text at all - they are whatever the picture is doing - so they inherit the shot's
+    full range. That difference says which sign of the residual is the writing, and unlike
+    response magnitude it does not care about contrast.
+
+    Measured per blob and then compared across blobs. A single pooled sample cannot do it:
+    pooling the peaks only samples wherever the background contrasts most, which is locally
+    uniform and makes everything look flat, while pooling a whole core drags in each blob's
+    soft edges, which sit at background luma and make everything look varied. Each blob's own
+    centre is pure, and it is the variation *between* blobs that is diagnostic.
     """
     if not core.any():
-        return -2.0
-    ring = cv2.dilate(core.astype(np.uint8), _K3).astype(bool) & ~core
-    if int(ring.sum()) < 4:
-        return -2.0
-    return float(other[ring].mean()) - float(background[ring].mean())
+        return 1.0
+    n, labels, stats, _ = cv2.connectedComponentsWithStats(core.astype(np.uint8), 8)
+    medians = []
+    for label in range(1, n):
+        if stats[label, cv2.CC_STAT_AREA] < 8:
+            continue
+        blob = labels == label
+        strength = signal[blob]
+        values = lum[blob]
+        medians.append(float(np.median(values[strength >= np.median(strength)])))
+    if len(medians) < 2:
+        pooled = lum[core]
+        return float(np.percentile(pooled, 90) - np.percentile(pooled, 10))
+    return float(np.percentile(medians, 90) - np.percentile(medians, 10))
+
+
+def _enclosed_fraction(inner: np.ndarray, outer: np.ndarray) -> float:
+    """How much of *inner* sits inside the region *outer* closes around.
+
+    This is the asymmetry that tells a glyph from its own outline: an outline is a closed
+    loop drawn around the fill, so filling its holes swallows the fill whole, while filling
+    the fill's holes leaves the outline outside.
+
+    Comparing what each one's immediate rim touches would be the obvious alternative, but a
+    stroke's anti-aliased fringe pushes that rim into the background, which is exactly where
+    the measurement breaks down. Hole-filling is a region test, so a one-pixel fringe cannot
+    swing it.
+    """
+    if not inner.any() or not outer.any():
+        return 0.0
+    filled = binary_fill_holes(outer)
+    if filled is None:
+        return 0.0
+    return float(filled[inner].mean())
 
 
 @dataclass
 class CropStats:
-    """Where the glyphs sit in the luma histogram of one crop."""
+    """Background-free glyph response for one crop.
+
+    Two masks, because the shape of the writing and how strongly it is showing are separate
+    questions. Everything that reasons about *what* the strokes are - thresholding, stroke
+    width, connected components - has to work on ``shape``, which is normalised so a stroke
+    reads as 1 no matter how faint the text is. ``alpha`` is that shape scaled back down by
+    ``level``, and it is what gets composited.
+    """
 
     polarity: str
-    lo: float  # luma mapped to alpha 0
-    hi: float  # luma mapped to alpha 1
-    rim: np.ndarray  # the opposite extreme class - the outline, if there is one
-    rim_is_majority: bool  # if so it is background, not an outline, and must not be grown into
+    alpha: np.ndarray  # float32 opacity in [0, 1] - the real strength of the text
+    shape: np.ndarray  # float32 in [0, 1], normalised so strokes read as 1
+    level: float  # the crop's peak opacity: 1.0 for solid text, lower mid-fade
+    rim: np.ndarray  # thin structures of the opposite sign - the outline, if any
 
 
 def _expand_into_rim(core: np.ndarray, rim: np.ndarray, iterations: int) -> np.ndarray:
     """Geodesic dilation of the glyph core into its own outline.
 
-    The luma ramp deliberately cuts off before the background, which also clips the dark
-    rim the glyphs are drawn with. That rim is part of the burned-in text and DepthCrafter
-    gets its depth just as wrong, so grow into it - but only into rim pixels, and only a
-    few steps, so a dark *background* can never be flooded.
+    The ramp deliberately cuts off at the stroke, which also clips the rim the glyphs are
+    drawn with. That rim is part of the burned-in text and DepthCrafter gets its depth just
+    as wrong, so grow into it - but only into rim pixels, and only a few steps, so nothing
+    can run away into the picture.
     """
     if iterations <= 0 or not rim.any() or not core.any():
         return core
@@ -120,54 +195,120 @@ def _expand_into_rim(core: np.ndarray, rim: np.ndarray, iterations: int) -> np.n
     return out
 
 
-def analyse_crop(lum: np.ndarray, cfg: StrokeConfig) -> CropStats | None:
-    """Decide polarity and the two luma anchors for the soft alpha ramp."""
-    t1, t2 = _three_way_split(lum)
-    hi_mask, lo_mask = lum > t2, lum < t1
-    if not hi_mask.any() and not lo_mask.any():
-        return None
-    mid_mask = ~hi_mask & ~lo_mask
+def _decide_polarity(lum: np.ndarray, white: np.ndarray, black: np.ndarray,
+                     w_peak: float, b_peak: float, cfg: StrokeConfig) -> str:
+    """Which sign of the residual is the writing.
 
-    # The background is whichever class owns the most pixels. Taking the middle class on
-    # faith fails whenever the outline and the background land in the same bin - then the
-    # middle holds nothing but anti-aliased edges, and its mean is a value that appears
-    # nowhere in the image.
-    named = {"lo": lo_mask, "mid": mid_mask, "hi": hi_mask}
-    majority_key = max(named, key=lambda k: int(named[k].sum()))
-    bg_mask = named[majority_key]
-    background = float(lum[bg_mask].mean())
-    hi_mean = float(lum[hi_mask].mean()) if hi_mask.any() else background
-    lo_mean = float(lum[lo_mask].mean()) if lo_mask.any() else background
+    Both signs almost always respond. Text is thin, but so is every gap between its strokes,
+    and outlined text answers one sign with its fill and the other with its rim - so response
+    strength on its own decides nothing. Three questions, strongest first:
+
+    1. Does only one sign respond at all? Rare, but free to check.
+    2. Which one is contained by the other? Writing is figure and everything else is ground,
+       whether "everything else" is an outline drawn around it or just the picture behind it.
+       This is the question that actually distinguishes them.
+    3. If containment is a wash, fall back to colour flatness: the strokes are one flat
+       colour while the gaps between them inherit whatever the shot is doing.
+    """
+    ratio = w_peak / max(b_peak, 1e-6)
+    if ratio > cfg.polarity_ratio:
+        return "light"
+    if ratio < 1.0 / cfg.polarity_ratio:
+        return "dark"
+
+    w_core, b_core = _core(white), _core(black)
+    light_score = _enclosed_fraction(_centres(white), b_core)
+    dark_score = _enclosed_fraction(_centres(black), w_core)
+    # Containment is only evidence when something is actually contained. A drawn outline is
+    # a closed loop and scores near 1; plain background is an open region that runs off the
+    # edge of the crop, so it encloses nothing and both scores come back low. Low scores
+    # therefore mean "not outlined text", not "the other one wins".
+    if max(light_score, dark_score) >= cfg.enclosure_min and \
+            abs(light_score - dark_score) > cfg.enclosure_margin:
+        return "light" if light_score > dark_score else "dark"
+
+    w_spread = _colour_spread(lum, white, w_core)
+    b_spread = _colour_spread(lum, black, b_core)
+    return "light" if w_spread <= b_spread else "dark"
+
+
+def analyse_crop(lum: np.ndarray, cfg: StrokeConfig,
+                 text_height: float | None = None) -> CropStats | None:
+    """Turn a luma crop into a soft glyph alpha, independent of the background behind it.
+
+    A global luma split cannot survive real footage: as soon as a detection box straddles a
+    lighting boundary - a bright shoulder on one side, shadow on the other - the classes get
+    spent describing the *background* rather than separating text from it, and the polarity
+    decision inverts. Subtracting an estimate of the background first removes that whole
+    class of failure.
+    """
+    height = float(text_height if text_height else lum.shape[0])
+    k = max(3, int(round(height * cfg.background_scale)))
+    k += 1 - (k % 2)  # median kernels must be odd
+    white, black, background = _residual_pair(lum, k)
+
+    w_peak = float(np.percentile(white, 99.5))
+    b_peak = float(np.percentile(black, 99.5))
+    if max(w_peak, b_peak) < cfg.min_response:
+        return None  # nothing thin and contrasty in this crop - no text here
 
     polarity = cfg.polarity
     if polarity == "auto":
-        # Text is never the bulk of a text box, so the majority class cannot be the glyphs.
-        # When outline and background merge into one class this alone settles it.
-        candidates = [p for p in ("light", "dark")
-                      if majority_key != ("hi" if p == "light" else "lo")]
-        if len(candidates) == 1:
-            polarity = candidates[0]
-        else:
-            light = _enclosure(hi_mask, lo_mask, bg_mask)
-            dark = _enclosure(lo_mask, hi_mask, bg_mask)
-            if abs(light - dark) > 0.1:
-                polarity = "light" if light > dark else "dark"
-            else:
-                # Nothing is enclosing anything - text drawn without an outline. Fall back
-                # to whichever extreme sits further from the background.
-                polarity = "light" if (hi_mean - background) >= (background - lo_mean) \
-                    else "dark"
+        polarity = _decide_polarity(lum, white, black, w_peak, b_peak, cfg)
 
-    if polarity == "light":
-        lo, hi = 0.5 * (background + t2), hi_mean
-        rim, rim_key = lo_mask, "lo"
-    else:
-        lo, hi = 0.5 * (background + t1), lo_mean
-        rim, rim_key = hi_mask, "hi"
-    if abs(hi - lo) < 1e-3:
+    signal, rim_signal = (white, black) if polarity == "light" else (black, white)
+    if float(signal.max()) < cfg.min_response:
         return None
-    return CropStats(polarity=polarity, lo=lo, hi=hi, rim=rim,
-                     rim_is_majority=(majority_key == rim_key))
+
+    # Recover the text's opacity rather than measuring its colour.
+    #
+    # A pixel where text of colour T covers background B at opacity a reads back as
+    # lum = a*T + (1-a)*B, so the residual against the background is exactly a*(T - B).
+    # Dividing by (T - B) therefore returns a itself, free of whatever the picture does.
+    #
+    # Testing the colour instead - "is this pixel the same shade as the other strokes?" -
+    # holds only while the text is fully opaque. The moment a credit fades, every pixel is
+    # part background, so the same glyph reads as many different shades and the mask comes
+    # back shredded, worst wherever the shot behind it varies most.
+    #
+    # It also gives the right answer for free: a credit at 30% opacity yields a 30% mask, so
+    # the depth is pushed 30% of the way and the text eases in instead of snapping.
+    reference = 1.0 if polarity == "light" else 0.0
+    # Floored so that where the background is already as bright as the text - and the text
+    # is therefore invisible - the division attenuates instead of amplifying noise.
+    contrast = np.maximum(np.abs(reference - background), cfg.min_response)
+    alpha = np.clip(signal / contrast, 0.0, 1.0).astype(np.float32)
+
+    # Split "what shape is it" from "how strongly is it showing". Left as one map, a credit
+    # at 40% opacity produces a mask that is 0.4 everywhere, and every downstream test that
+    # asks `> 0.5` - the stroke-width filter, the component filter - throws the whole word
+    # away. Normalising by the crop's own peak restores a shape those tests can read, and
+    # the peak is carried alongside as the level to scale back down by.
+    core = _core(alpha)
+    if not core.any():
+        return None
+    level = float(np.percentile(alpha[core], 90))
+    if level < cfg.min_response:
+        return None
+    level = min(level, 1.0)
+    shape = np.clip(alpha / level, 0.0, 1.0).astype(np.float32)
+    if not np.any(shape > 0.5):
+        return None
+
+    # Only treat the opposite sign as an outline when it is a real response. On text drawn
+    # without a rim that channel is just noise, and growing into it would fur every glyph.
+    rim = np.zeros(lum.shape, bool)
+    if float(np.percentile(rim_signal, 99.5)) >= cfg.min_response:
+        rim_core = _core(rim_signal)
+        rim_centres = _centres(rim_signal)
+        if rim_core.any() and rim_centres.any():
+            # An outline is flat-coloured too, so hold it to the same test as the fill.
+            # Without this the rim also captures the gaps between strokes, which respond
+            # just as thinly, and the mask creeps out into the picture.
+            rim_lum = float(np.median(lum[rim_centres]))
+            rim = rim_core & (np.abs(lum - rim_lum) <= cfg.luma_tol)
+    return CropStats(polarity=polarity, alpha=alpha, shape=shape, level=level,
+                     rim=rim)
 
 
 def _stroke_width(mask: np.ndarray) -> float:
@@ -191,40 +332,54 @@ def extract_patch(frame: np.ndarray, det: Detection,
     crop = frame[y0:y1, x0:x1].astype(np.float32)
     lum = (0.2126 * crop[..., 0] + 0.7152 * crop[..., 1] + 0.0722 * crop[..., 2]) / 255.0
 
-    stats = analyse_crop(lum, cfg)
+    stats = analyse_crop(lum, cfg, text_height=det.height)
     if stats is None:
         return None
-    polarity = stats.polarity
-    alpha = np.clip((lum - stats.lo) / (stats.hi - stats.lo), 0.0, 1.0).astype(np.float32)
 
-    binary = (alpha > 0.5).astype(np.uint8)
+    # Identify the strokes on the normalised shape, so a faded credit is judged the same as
+    # a solid one, then scale the survivors back to the opacity they are actually showing at.
+    binary = (stats.shape > 0.5).astype(np.uint8)
     if not binary.any():
         return None
 
-    kept = _filter_components(binary, lum, alpha, cfg, polarity)
+    kept = _filter_components(binary, cfg, det.height)
     if kept is None:
         return None
 
-    alpha = alpha * kept
-    if cfg.rim_expand > 0 and not stats.rim_is_majority:
-        grown = _expand_into_rim(alpha > 0.5, stats.rim, cfg.rim_expand)
-        alpha = np.maximum(alpha, grown.astype(np.float32))
+    shape = stats.shape * kept
+    if cfg.rim_expand > 0:
+        grown = _expand_into_rim(shape > 0.5, stats.rim, cfg.rim_expand)
+        shape = np.maximum(shape, grown.astype(np.float32))
+    alpha = (shape * stats.level).astype(np.float32)
     if float(alpha.max()) <= 0.0:
         return None
-    return AlphaPatch(x0=x0, y0=y0, alpha=alpha, det=det)
+    return AlphaPatch(x0=x0, y0=y0, alpha=alpha, det=det, level=stats.level)
 
 
-def _filter_components(binary: np.ndarray, lum: np.ndarray, alpha: np.ndarray,
-                       cfg: StrokeConfig, polarity: str) -> np.ndarray | None:
+def stroke_bounds(cfg: StrokeConfig, text_height: float) -> tuple[float, float]:
+    """Plausible stroke thickness for text of this size, in pixels.
+
+    Fixed pixel limits cannot work across resolutions: a cap that is generous for a 720p
+    subtitle silently rejects every glyph of the same credit roll at 4K. Real typefaces put
+    the stem somewhere under a third of the cap height, so scale with the detected text and
+    keep the configured value as a floor for very small text.
+    """
+    if text_height <= 0:
+        return cfg.min_stroke, cfg.max_stroke
+    return cfg.min_stroke, max(cfg.max_stroke, cfg.max_stroke_frac * text_height)
+
+
+def _filter_components(binary: np.ndarray, cfg: StrokeConfig,
+                       text_height: float = 0.0) -> np.ndarray | None:
     """Drop connected components that do not look like glyph strokes."""
     ch, cw = binary.shape
     crop_area = ch * cw
+    min_stroke, max_stroke = stroke_bounds(cfg, text_height)
     n, labels, stats, _ = cv2.connectedComponentsWithStats(binary, connectivity=8)
     if n <= 1:
         return None
 
     keep = np.zeros(binary.shape, dtype=np.float32)
-    ring_kernel = cv2.getStructuringElement(cv2.MORPH_ELLIPSE, (5, 5))
     any_kept = False
     max_span_w, max_span_h = cw - 1, ch - 1
 
@@ -240,10 +395,7 @@ def _filter_components(binary: np.ndarray, lum: np.ndarray, alpha: np.ndarray,
 
         comp = (labels == label)
         sw = _stroke_width(comp)
-        if not (cfg.min_stroke <= sw <= cfg.max_stroke):
-            continue
-
-        if cfg.outline_check and not _has_outline(comp, lum, ring_kernel, cfg, polarity):
+        if not (min_stroke <= sw <= max_stroke):
             continue
 
         keep[comp] = 1.0
@@ -258,22 +410,11 @@ def _filter_components(binary: np.ndarray, lum: np.ndarray, alpha: np.ndarray,
     return keep
 
 
-def _has_outline(comp: np.ndarray, lum: np.ndarray, kernel: np.ndarray,
-                 cfg: StrokeConfig, polarity: str) -> bool:
-    """Burned-in text carries a dark outline or drop shadow. Bright scenery does not."""
-    core = comp.astype(np.uint8)
-    ring = cv2.dilate(core, kernel).astype(bool) & ~comp
-    if ring.sum() < 4:
-        return False
-    core_mean = float(lum[comp].mean())
-    ring_mean = float(lum[ring].mean())
-    if polarity == "light":
-        return (core_mean - ring_mean) > cfg.outline_delta
-    return (ring_mean - core_mean) > cfg.outline_delta
+def compose_alpha(patches, height: int, width: int, normalised: bool = False) -> np.ndarray:
+    """Merge per-detection patches into one full-frame float32 alpha.
 
-
-def compose_alpha(patches, height: int, width: int) -> np.ndarray:
-    """Merge per-detection patches into one full-frame float32 alpha."""
+    With *normalised* set, the fade is divided out first, giving the stroke shape on its own.
+    """
     alpha = np.zeros((height, width), dtype=np.float32)
     for patch in patches:
         ph, pw = patch.shape
@@ -281,6 +422,28 @@ def compose_alpha(patches, height: int, width: int) -> np.ndarray:
         y1, x1 = min(height, y0 + ph), min(width, x0 + pw)
         if y1 <= y0 or x1 <= x0:
             continue
+        source = patch.normalised if normalised else patch.alpha
         view = alpha[y0:y1, x0:x1]
-        np.maximum(view, patch.alpha[: y1 - y0, : x1 - x0], out=view)
+        np.maximum(view, source[: y1 - y0, : x1 - x0], out=view)
     return alpha
+
+
+def compose_levels(patches, height: int, width: int) -> np.ndarray:
+    """A per-pixel map of how strongly the text is showing, one region per detection.
+
+    Collapsing the frame to a single number - the strongest patch, say - lets one bad
+    reading speak for every word on screen. Keeping the level where it was measured means a
+    misread box only distorts its own few hundred pixels.
+    """
+    levels = np.zeros((height, width), dtype=np.float32)
+    for patch in patches:
+        ph, pw = patch.shape
+        y0, x0 = patch.y0, patch.x0
+        y1, x1 = min(height, y0 + ph), min(width, x0 + pw)
+        if y1 <= y0 or x1 <= x0:
+            continue
+        covered = patch.normalised[: y1 - y0, : x1 - x0] > 0.25
+        view = levels[y0:y1, x0:x1]
+        np.maximum(view, np.where(covered, np.float32(patch.level), np.float32(0.0)),
+                   out=view)
+    return levels

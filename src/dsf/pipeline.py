@@ -11,6 +11,7 @@ import warnings
 from dataclasses import dataclass, field
 from typing import Callable, Iterator, Sequence
 
+import cv2
 import numpy as np
 
 from .composite import composite_frame, resize_alpha
@@ -18,9 +19,10 @@ from .config import PipelineConfig
 from .detect import build_detectors
 from .detect.base import Detection, merge_detections
 from .filters import GeometryFilter, appearance_ok, persistence_ok, sliding_window
-from .refine.strokes import AlphaPatch, compose_alpha, extract_patch
+from .media import is_sequence, open_depth_sink, probe, read_depth, read_rgb
+from .refine.strokes import AlphaPatch, compose_alpha, compose_levels, extract_patch
 from .temporal import from_u8, smooth, to_u8
-from .videoio import DepthFrame, DepthWriter, VideoInfo, probe, read_depth, read_rgb
+from .videoio import VideoInfo
 
 ProgressFn = Callable[[int], None]
 
@@ -109,17 +111,33 @@ def iter_masks_detailed(rgb_path: str, cfg: PipelineConfig, info: VideoInfo | No
     items = iter_frame_items(rgb_path, cfg, info, start=start, max_frames=max_frames,
                              seek_frame=seek_frame, progress=progress, detectors=detectors)
 
-    def gated() -> Iterator[tuple[np.ndarray, list[Detection]]]:
+    def gated() -> Iterator[tuple[np.ndarray, float, list[Detection]]]:
         radius = max(0, cfg.filters.persist_window // 2)
         for item, window in sliding_window(items, radius):
             window_dets = [w.detections for w in window]
             kept = [p for p in item.patches
                     if persistence_ok(p.det, window_dets, cfg.filters)]
-            yield to_u8(compose_alpha(kept, info.height, info.width)), [p.det for p in kept]
+            # The stroke shape and the strength it is showing at travel separately, and the
+            # strength stays per-region rather than becoming one number for the frame.
+            shape = compose_alpha(kept, info.height, info.width, normalised=True)
+            levels = compose_levels(kept, info.height, info.width)
+            yield to_u8(shape), to_u8(levels), [p.det for p in kept]
 
+    # Temporal filtering settles *where* the text is, never how strongly it shows. Applied
+    # to the finished mask it would drag a fading credit up to its neighbours' strength -
+    # so the last frame of a fade-out, with nothing detected on it at all, would still get
+    # a near-solid mask stamped into depth that was never corrupted.
     radius = max(0, cfg.temporal.window // 2)
-    for (mask, dets), window in sliding_window(gated(), radius):
-        yield smooth(mask, [m for m, _ in window], cfg.temporal), dets
+    grow = np.ones((5, 5), np.uint8)
+    for (shape_u8, level_u8, dets), window in sliding_window(gated(), radius):
+        # Smoothing fills in a frame whose extraction came out patchy, using the same text
+        # its neighbours found. Scaling by this frame's own levels, never borrowed ones,
+        # keeps a frame where nothing was found at zero: the first and last frames of a fade
+        # have no text left to mask and depth that was never corrupted.
+        smoothed = smooth(shape_u8, [s for s, _, _ in window], cfg.temporal)
+        # Grown a little so pixels the smoothing filled back in are covered by the level of
+        # the text they belong to rather than falling off its edge.
+        yield to_u8(from_u8(smoothed) * from_u8(cv2.dilate(level_u8, grow))), dets
 
 
 def iter_masks(rgb_path: str, cfg: PipelineConfig, info: VideoInfo | None = None,
@@ -168,17 +186,19 @@ def render_from_masks(depth_path: str, masks: Iterator[np.ndarray], out_path: st
                       start: int = 0, progress: ProgressFn | None = None) -> int:
     """Composite a stream of masks onto the depth map and encode the result."""
     depth_info = depth_info or probe(depth_path)
+    sink = open_depth_sink(out_path, depth_info, cfg, is_sequence(depth_path))
     written = 0
-    with DepthWriter(out_path, depth_info, encoder=cfg.encode.encoder, crf=cfg.encode.crf,
-                     preset=cfg.encode.preset, lossless=cfg.encode.lossless) as writer:
-        for frame, mask_u8 in zip(read_depth(depth_path, depth_info, start=start), masks):
+    try:
+        for unit, mask_u8 in zip(read_depth(depth_path, depth_info, start=start), masks):
             alpha = resize_alpha(from_u8(mask_u8), depth_info.width, depth_info.height)
-            y = composite_frame(frame.y, alpha, cfg.composite,
-                                depth_info.bit_depth, depth_info.color_range)
-            writer.write(DepthFrame(y=y, u=frame.u, v=frame.v))
+            plane = composite_frame(unit.plane, alpha, cfg.composite,
+                                    depth_info.bit_depth, depth_info.color_range)
+            sink.write(unit, plane)
             written += 1
             if progress:
                 progress(written)
+    finally:
+        sink.close()
     return written
 
 
@@ -238,14 +258,14 @@ def sample_frames(rgb_path: str, indices: Sequence[int]) -> dict[int, np.ndarray
 
 
 def sample_depth(depth_path: str, indices: Sequence[int],
-                 info: VideoInfo | None = None) -> dict[int, DepthFrame]:
+                 info: VideoInfo | None = None) -> dict[int, object]:
     """Grab specific depth frames by index, seeking to the first one."""
     wanted = sorted(set(int(i) for i in indices if i >= 0))
     if not wanted:
         return {}
     info = info or probe(depth_path)
     base, last = wanted[0], wanted[-1]
-    out: dict[int, DepthFrame] = {}
+    out: dict[int, object] = {}
     for offset, frame in enumerate(read_depth(depth_path, info, seek_frame=base)):
         idx = base + offset
         if idx in wanted:

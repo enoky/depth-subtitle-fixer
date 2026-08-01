@@ -50,12 +50,13 @@ def test_detectors_parse_as_a_tuple():
     assert cfg.detect.detectors == ("doctr", "easyocr")
 
 
-def test_store_false_flag_only_applies_when_given():
+def test_numeric_flag_only_applies_when_given():
     base = cfg_from(["fix", "--rgb", "a", "--depth", "b", "--out", "c"])
-    assert base.strokes.outline_check is True
+    assert base.strokes.min_response == pytest.approx(0.05)
 
-    off = cfg_from(["fix", "--rgb", "a", "--depth", "b", "--out", "c", "--no-outline-check"])
-    assert off.strokes.outline_check is False
+    given = cfg_from(["fix", "--rgb", "a", "--depth", "b", "--out", "c",
+                      "--min-response", "0.2"])
+    assert given.strokes.min_response == pytest.approx(0.2)
 
 
 def test_lossless_flag():

@@ -248,6 +248,11 @@ class DepthFrame:
     u: np.ndarray | None
     v: np.ndarray | None
 
+    @property
+    def plane(self) -> np.ndarray:
+        """The depth values, named the same way an image-sequence frame names them."""
+        return self.y
+
 
 def read_depth(path: str | Path, info: VideoInfo | None = None,
                start: int = 0, seek_frame: int = 0) -> Iterator[DepthFrame]:

@@ -81,9 +81,26 @@ class StrokeConfig:
     min_cc_area: int = 8
     max_cc_area_frac: float = 0.35
     min_stroke: float = 0.8
+    #: absolute floor for the stroke-width cap, in px
     max_stroke: float = 16.0
-    outline_check: bool = True
-    outline_delta: float = 0.05
+    #: and as a fraction of the detected text height, so 4K credits are not rejected
+    max_stroke_frac: float = 0.45
+    #: background-median window as a fraction of text height. It has to be wide enough that
+    #: the writing is a *minority* of the window - roughly a whole letter across. Sized off a
+    #: stroke instead, a bold word wins its own median, its interior reads as background, and
+    #: the word comes back hollow or vanishes outright.
+    background_scale: float = 0.90
+    #: minimum residual for a crop to contain text at all
+    min_response: float = 0.05
+    #: how much stronger one sign must be before magnitude alone decides polarity
+    polarity_ratio: float = 1.6
+    #: how far an outline pixel's luma may drift from the outline's own colour. Only the
+    #: rim is colour-tested; the fill is found by opacity, which survives fades.
+    luma_tol: float = 0.20
+    #: containment gap needed before enclosure alone decides which sign is the text
+    enclosure_margin: float = 0.15
+    #: and how much must actually be contained for the test to count as evidence at all
+    enclosure_min: float = 0.50
     #: how far the mask grows from the glyph core into the surrounding outline, in px
     rim_expand: int = 3
 

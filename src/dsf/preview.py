@@ -74,8 +74,8 @@ def write_previews(rgb_path: str, depth_path: str, frame_indices: Sequence[int],
                    cfg: PipelineConfig, out_dir: str | Path,
                    panel_width: int = 640) -> list[Path]:
     """Render and save a contact sheet per requested frame index."""
+    from .media import probe
     from .pipeline import masks_for_frames, sample_depth, sample_frames
-    from .videoio import probe
 
     out_dir = Path(out_dir)
     out_dir.mkdir(parents=True, exist_ok=True)
@@ -94,9 +94,9 @@ def write_previews(rgb_path: str, depth_path: str, frame_indices: Sequence[int],
         mask_u8, detections = masks[idx]
         alpha_rgb = from_u8(mask_u8)
         alpha = resize_alpha(alpha_rgb, depth_info.width, depth_info.height)
-        after = composite_frame(depth_frame.y, alpha, cfg.composite,
+        after = composite_frame(depth_frame.plane, alpha, cfg.composite,
                                 depth_info.bit_depth, depth_info.color_range)
-        sheet = contact_sheet(rgb, alpha_rgb, depth_frame.y, after,
+        sheet = contact_sheet(rgb, alpha_rgb, depth_frame.plane, after,
                               depth_info.bit_depth, detections=detections,
                               panel_width=panel_width)
         path = out_dir / f"preview_{idx:06d}.png"
