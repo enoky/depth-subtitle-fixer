@@ -101,6 +101,97 @@ def iter_frame_items(rgb_path: str, cfg: PipelineConfig, info: VideoInfo,
                 progress(index)
 
 
+def remembered(stream: Iterator[tuple[np.ndarray, np.ndarray, list[Detection]]],
+               cfg: PipelineConfig
+               ) -> Iterator[tuple[np.ndarray, np.ndarray, list[Detection]]]:
+    """Drop marks that never show up as real text anywhere nearby in time.
+
+    Part-way through a fade the mask is normalised by whatever the text is showing at, so a
+    small divisor amplifies everything else in the frame along with it - a lit edge behind
+    the credit crosses the threshold and lands in the mask as a speck. Nothing inside a
+    single frame separates that from a faint glyph: at 25% opacity their contrasts are
+    comparable.
+
+    Across time they are not comparable at all. The credit is on screen at full strength a
+    moment later; the lit edge never is. So frames where the text is unambiguous vote on
+    where text can be, and faint frames are held to that.
+
+    The obvious hazard is scrolling credits, where a remembered shape would sit over the
+    wrong place and erase the text. Hence the overlap check: the memory only filters a frame
+    when it already explains most of what that frame found, so text that has moved is left
+    alone rather than deleted.
+    """
+    radius = max(0, cfg.temporal.prior_window // 2)
+    if radius == 0:
+        yield from stream
+        return
+
+    confident_level = cfg.temporal.prior_min_level * 255.0
+    slack = cv2.getStructuringElement(
+        cv2.MORPH_ELLIPSE,
+        (2 * max(1, cfg.temporal.prior_tolerance) + 1,) * 2)
+
+    for (shape_u8, level_u8, dets), window in sliding_window(stream, radius):
+        found = (shape_u8 > 127).astype(np.uint8)
+        if not found.any():
+            yield shape_u8, level_u8, dets
+            continue
+
+        trusted = None
+        for other_shape, other_level, _ in window:
+            if float(other_level.max()) < confident_level:
+                continue
+            witness = other_shape > 127
+            trusted = witness if trusted is None else (trusted | witness)
+        if trusted is None or not trusted.any():
+            # Nothing nearby is unambiguous - no grounds to overrule this frame.
+            yield shape_u8, level_u8, dets
+            continue
+
+        allowed = cv2.dilate(trusted.astype(np.uint8), slack).astype(bool)
+
+        # Judged per blob, and each blob is kept or dropped whole. A speck the fade
+        # amplified has no counterpart in the remembered shape at all, while a glyph that
+        # has drifted overlaps it partly - and clipping that glyph to the overlap would bite
+        # pieces out of the text, which is the very artefact this is meant to remove. The
+        # bar for keeping a blob is therefore *any* real support, not most of it: a faint
+        # frame's mask spills a little past where the solid frames put the text.
+        count, labels, stats, _ = cv2.connectedComponentsWithStats(found, 8)
+        # Blobs are the unit of judgement, but the mask is soft - the antialiased skirt
+        # around each stroke sits below the threshold and belongs to no blob at all. Each
+        # of those pixels takes the verdict of the stroke it borders, because zeroing every
+        # one of them would shave the edge off every glyph in the frame.
+        overlaps, areas = [], []
+        for label in range(1, count):
+            blob = labels == label
+            overlaps.append(float(allowed[blob].mean()))
+            areas.append(int(stats[label, cv2.CC_STAT_AREA]))
+        if not overlaps:
+            yield shape_u8, level_u8, dets
+            continue
+
+        # If the memory does not describe this frame at all, the text has moved and the
+        # prior stands down rather than deleting it. This is what keeps scrolling credits
+        # safe: their glyphs sit where no earlier frame's glyph sat.
+        weighted = float(np.average(overlaps, weights=areas))
+        if weighted < cfg.temporal.prior_min_overlap:
+            yield shape_u8, level_u8, dets
+            continue
+
+        keep = np.zeros(found.shape, np.uint8)
+        dropped = False
+        for label, overlap in enumerate(overlaps, start=1):
+            if overlap >= cfg.temporal.prior_min_support:
+                keep[labels == label] = 1
+            else:
+                dropped = True
+        if not dropped:
+            yield shape_u8, level_u8, dets
+            continue
+        yield np.where(cv2.dilate(keep, slack).astype(bool), shape_u8, np.uint8(0)), \
+            level_u8, dets
+
+
 def iter_masks_detailed(rgb_path: str, cfg: PipelineConfig, info: VideoInfo | None = None,
                         start: int = 0, max_frames: int | None = None, seek_frame: int = 0,
                         progress: ProgressFn | None = None,
@@ -123,21 +214,21 @@ def iter_masks_detailed(rgb_path: str, cfg: PipelineConfig, info: VideoInfo | No
             levels = compose_levels(kept, info.height, info.width)
             yield to_u8(shape), to_u8(levels), [p.det for p in kept]
 
-    # Temporal filtering settles *where* the text is, never how strongly it shows. Applied
-    # to the finished mask it would drag a fading credit up to its neighbours' strength -
-    # so the last frame of a fade-out, with nothing detected on it at all, would still get
-    # a near-solid mask stamped into depth that was never corrupted.
-    radius = max(0, cfg.temporal.window // 2)
+    def smoothed() -> Iterator[tuple[np.ndarray, np.ndarray, list[Detection]]]:
+        # Temporal filtering settles *where* the text is, never how strongly it shows.
+        # Applied to the finished mask it would drag a fading credit up to its neighbours'
+        # strength - so the last frame of a fade-out, with nothing detected on it at all,
+        # would still get a near-solid mask stamped into depth that was never corrupted.
+        radius = max(0, cfg.temporal.window // 2)
+        for (shape_u8, level_u8, dets), window in sliding_window(gated(), radius):
+            yield (smooth(shape_u8, [s for s, _, _ in window], cfg.temporal),
+                   level_u8, dets)
+
     grow = np.ones((5, 5), np.uint8)
-    for (shape_u8, level_u8, dets), window in sliding_window(gated(), radius):
-        # Smoothing fills in a frame whose extraction came out patchy, using the same text
-        # its neighbours found. Scaling by this frame's own levels, never borrowed ones,
-        # keeps a frame where nothing was found at zero: the first and last frames of a fade
-        # have no text left to mask and depth that was never corrupted.
-        smoothed = smooth(shape_u8, [s for s, _, _ in window], cfg.temporal)
-        # Grown a little so pixels the smoothing filled back in are covered by the level of
-        # the text they belong to rather than falling off its edge.
-        yield to_u8(from_u8(smoothed) * from_u8(cv2.dilate(level_u8, grow))), dets
+    for shape_u8, level_u8, dets in remembered(smoothed(), cfg):
+        # Levels grown a little so pixels the smoothing filled back in are covered by the
+        # level of the text they belong to rather than falling off its edge.
+        yield to_u8(from_u8(shape_u8) * from_u8(cv2.dilate(level_u8, grow))), dets
 
 
 def iter_masks(rgb_path: str, cfg: PipelineConfig, info: VideoInfo | None = None,
@@ -276,8 +367,9 @@ def sample_depth(depth_path: str, indices: Sequence[int],
 
 
 def context_radius(cfg: PipelineConfig) -> int:
-    """How far either side of a frame the gates need to see."""
-    return max(cfg.filters.persist_window // 2, cfg.temporal.window // 2, 1)
+    """How far either side of a frame the gates and the prior need to see."""
+    return max(cfg.filters.persist_window // 2, cfg.temporal.window // 2,
+               cfg.temporal.prior_window // 2, 1)
 
 
 def context_frames(cfg: PipelineConfig, index: int) -> int:

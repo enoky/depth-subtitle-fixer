@@ -22,10 +22,16 @@ def test_a_single_preview_frame_costs_a_window_of_work():
     assert context_frames(cfg, 1) == radius + 2
 
 
-def test_context_grows_with_the_gate_windows():
+@pytest.mark.parametrize("section,field", [
+    ("filters", "persist_window"),
+    ("temporal", "window"),
+    ("temporal", "prior_window"),
+])
+def test_context_grows_with_every_gate_window(section, field):
+    """Each of these looks either side of the frame, so each one has to widen the run."""
     base = PipelineConfig()
-    wide = dataclasses.replace(
-        base, filters=dataclasses.replace(base.filters, persist_window=21))
+    wide = dataclasses.replace(base, **{section: dataclasses.replace(
+        getattr(base, section), **{field: 41})})
     assert context_frames(wide, 500) > context_frames(base, 500)
 
 

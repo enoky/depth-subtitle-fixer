@@ -109,6 +109,11 @@ KNOBS: list[Knob] = [
        choices=["median", "max", "none"]),
     _k("temporal_window", "temporal", "window", "strokes_adv", "Temporal window", "slider",
        minimum=1, maximum=15, step=2),
+    _k("prior_window", "temporal", "prior_window", "strokes_adv",
+       "Remember text over (frames)", "slider", minimum=0, maximum=61, step=2,
+       info="stops a fade pulling scene detail in; 0 disables and speeds up previews"),
+    _k("prior_min_level", "temporal", "prior_min_level", "strokes_adv",
+       "Evidence needs opacity", "slider", minimum=0.1, maximum=1.0, step=0.05),
 
     # ------------------------------------------------------------------- depth repair
     _k("brightness", "composite", "brightness", "repair", "Brightness", "slider",

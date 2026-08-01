@@ -46,6 +46,8 @@ ARG_MAP: list[tuple[str, str, str]] = [
     ("rim_expand", "strokes", "rim_expand"),
     ("temporal", "temporal", "mode"),
     ("temporal_window", "temporal", "window"),
+    ("prior_window", "temporal", "prior_window"),
+    ("prior_min_level", "temporal", "prior_min_level"),
     ("brightness", "composite", "brightness"),
     ("brightness_mode", "composite", "brightness_mode"),
     ("dilate", "composite", "dilate"),
@@ -109,6 +111,12 @@ def add_detect_args(p: argparse.ArgumentParser) -> None:
     g.add_argument("--temporal", choices=("median", "max", "none"),
                    help="temporal mask filter")
     g.add_argument("--temporal-window", type=int, help="frames in the temporal filter")
+    g.add_argument("--prior-window", type=int,
+                   help="frames the mask remembers text over, so a fade cannot pull scene "
+                        "detail in (default 21; 0 disables and previews get faster)")
+    g.add_argument("--prior-min-level", type=float,
+                   help="how opaque text must be for a frame to count as evidence of where "
+                        "text is (default 0.6)")
 
 
 def add_composite_args(p: argparse.ArgumentParser) -> None:

@@ -113,10 +113,31 @@ class StrokeConfig:
 
 @dataclass(frozen=True)
 class TemporalConfig:
-    """Flicker suppression across the alpha-mask stack."""
+    """Flicker suppression across the alpha-mask stack, and the memory of where text was."""
 
     mode: str = "median"  # median | max | none
     window: int = 3
+
+    #: Frames the prior looks over. Part-way through a fade the mask is normalised by
+    #: whatever the text is showing at, so a small divisor amplifies the scene along with
+    #: it. Nothing in a single frame separates a faint glyph from a lit edge behind it at
+    #: that point - but the credit is also on screen at full strength a second later, and
+    #: the lit edge never is. 0 disables the prior.
+    prior_window: int = 21
+    #: A frame counts as evidence once its text peaks at least this opaque.
+    prior_min_level: float = 0.60
+    #: Slack in px when matching a faint mark against the remembered shape.
+    prior_tolerance: int = 3
+    #: If the remembered shape explains less than this much of what a frame found overall,
+    #: the text has moved and the prior stands down rather than erasing it - which is what
+    #: keeps scrolling credits safe.
+    prior_min_overlap: float = 0.50
+    #: How much of a single mark the memory must explain for that mark to be kept. On static
+    #: text the two populations are far apart - glyphs measure ~1.0, specks ~0.2 - so the
+    #: exact value does not matter much, and it is set below `prior_min_overlap` on purpose:
+    #: a frame whose text has drifted just far enough to sit near the stand-down bar keeps
+    #: its glyphs whole rather than losing the ones that drifted furthest.
+    prior_min_support: float = 0.35
 
 
 @dataclass(frozen=True)
