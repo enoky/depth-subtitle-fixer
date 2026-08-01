@@ -163,7 +163,11 @@ def build_app(session: "Session | None" = None, native_dialogs: bool = True):
 
         Without this the profile would be inert: every widget always holds a value, so the
         controls would override the preset the instant it was chosen.
+
+        A profile moves detection settings, so the cached masks no longer describe what the
+        controls now say - they are dropped here and the redraw chained after this recomputes.
         """
+        session.invalidate_masks()
         wanted = profile_defaults(profile)
         return [gr.update(value=wanted[k.key]) for k in CONFIG_KNOBS]
 
@@ -304,12 +308,23 @@ def build_app(session: "Session | None" = None, native_dialogs: bool = True):
         out_browse.click(browse_out, [out_path, depth_file], out_path)
         load_btn.click(on_load, [rgb_file, depth_file, out_path],
                        [info_box, frame_idx, out_path])
-        widgets["profile"].change(on_profile, widgets["profile"],
-                                  [widgets[k.key] for k in CONFIG_KNOBS])
-
         preview_inputs = [frame_idx, recompute, *control_widgets]
+
+        # Listen on `input`, not `change`. `change` also fires when a value is set
+        # programmatically, so resetting the controls for a new profile would kick off a
+        # redraw per control it touched - dozens of them, each recompositing the frame,
+        # before anything appeared. `input` fires only when the user moves something.
+        #
+        # `always_last` coalesces a drag: the run in flight finishes, then one more runs with
+        # wherever the slider ended up, instead of queueing a render per step.
         for control in [frame_idx, recompute, *live_widgets]:
-            control.change(render_frame, preview_inputs, [sheet, stats])
+            control.input(render_frame, preview_inputs, [sheet, stats],
+                          trigger_mode="always_last")
+
+        # One redraw after the profile has finished rewriting the other controls.
+        widgets["profile"].change(
+            on_profile, widgets["profile"], [widgets[k.key] for k in CONFIG_KNOBS],
+        ).then(render_frame, preview_inputs, [sheet, stats])
 
         render_btn.click(render_clip, [out_path, max_frames, *control_widgets],
                          [render_status, render_file])

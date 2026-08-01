@@ -48,8 +48,10 @@ def _k(key, section, field, group, label, kind, **options) -> Knob:
 #: Every field the CLI can set, plus the handful of controls that only exist in the app.
 KNOBS: list[Knob] = [
     # ---------------------------------------------------------------- detection (main)
+    # Not preview-bound: switching profile rewrites every other control, and the app
+    # redraws once after that has settled rather than once per control it touched.
     _k("profile", None, None, "detect", "Profile", "radio",
-       choices=["subtitles", "credits", "both"], value="subtitles",
+       choices=["subtitles", "credits", "both"], value="subtitles", live=False,
        info="preset defaults; the controls below then apply on top"),
     _k("detectors", "detect", "detectors", "detect", "Detectors", "checkboxgroup",
        choices=["doctr", "easyocr"]),

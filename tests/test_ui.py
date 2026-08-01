@@ -121,3 +121,65 @@ def test_encoding_controls_do_not_redraw_the_preview():
 
     encode = [k for k in KNOBS if k.group == "encode"]
     assert encode and all(not k.live for k in encode)
+
+
+def _deps(demo):
+    return list(demo.fns.values())
+
+
+def _named(demo, name):
+    return [f for f in _deps(demo) if getattr(f.fn, "__name__", "") == name]
+
+
+def _direct(fns):
+    """Bindings to a real control, as opposed to a `.then` chained off another event."""
+    return [f for f in fns if any(cid is not None for cid, _ in f.targets)]
+
+
+def _chained(fns):
+    return [f for f in fns if all(cid is None for cid, _ in f.targets)]
+
+
+def test_the_preview_listens_to_user_input_not_to_value_changes():
+    """`change` also fires when a value is set programmatically.
+
+    Switching profile rewrites every other control, so a `change` binding kicked off one
+    redraw per control it touched - dozens of them, each recompositing the frame, before
+    anything appeared.
+    """
+    from dsf.ui import Session, build_app
+
+    demo = build_app(Session(), native_dialogs=False)
+    direct = _direct(_named(demo, "render_frame"))
+    assert len(direct) > 20, "expected the preview bound to every live control"
+    events = {event for fn in direct for _, event in fn.targets}
+    assert events == {"input"}, f"preview redraws bound to {sorted(events)}"
+
+
+def test_dragging_a_control_coalesces_instead_of_queueing():
+    """Without this a drag queues a full recomposite per step and runs long after you stop."""
+    from dsf.ui import Session, build_app
+
+    demo = build_app(Session(), native_dialogs=False)
+    modes = {fn.trigger_mode for fn in _direct(_named(demo, "render_frame"))}
+    assert modes == {"always_last"}, f"preview trigger modes: {modes}"
+
+
+def test_switching_profile_redraws_exactly_once():
+    """One `on_profile` to rewrite the controls, with a single redraw chained after it."""
+    from dsf.ui import Session, build_app
+
+    demo = build_app(Session(), native_dialogs=False)
+    profile_events = _named(demo, "on_profile")
+    assert len(profile_events) == 1
+    assert [event for _, event in profile_events[0].targets] == ["change"], \
+        "the reset itself must run on change - input would miss a programmatic profile set"
+
+    # The redraw is chained off the reset rather than bound to the profile control, so it
+    # runs after the other controls have settled.
+    profile_id = profile_events[0].targets[0][0]
+    renders = _named(demo, "render_frame")
+    bound_to_profile = [fn for fn in renders
+                        if any(cid == profile_id for cid, _ in fn.targets)]
+    assert not bound_to_profile, "profile must not also trigger a redraw directly"
+    assert len(_chained(renders)) == 1, "expected exactly one redraw chained after the reset"
