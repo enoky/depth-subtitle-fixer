@@ -80,8 +80,8 @@ Or tune interactively with a frame scrubber and live sliders:
 dsf ui
 ```
 
-On Windows, `ui.bat` in the project root does the same from a double-click - it activates
-the `.venv` for you and forwards any flags, so `ui.bat --port 7861` works too.
+On Windows, `RUN_dsf.bat` in the project root does the same from a double-click - it activates
+the `.venv` for you and forwards any flags, so `RUN_dsf.bat --port 7861` works too.
 
 The app exposes **every** setting the command line does - the everyday ones up front, the
 rest under *Detection — advanced*, *Glyph extraction — advanced* and *Encoding*. A test
