@@ -54,6 +54,58 @@ def test_single_frame_window_is_a_passthrough():
     assert int(out[0, 0]) == 77
 
 
+@pytest.mark.parametrize("count", range(2, 13))
+def test_the_sorting_network_really_sorts(count):
+    """By the 0-1 principle: a comparator network that sorts every binary input sorts any.
+
+    The network is generated for the next power of two with the comparators reaching past
+    the end dropped, and that it still sorts is the whole basis for not padding the window
+    out - padding would put invented values in the middle, where the median is read from.
+    """
+    import itertools
+
+    from dsf.temporal import _sorting_network
+
+    network = _sorting_network(count)
+    for bits in itertools.product((0, 1), repeat=count):
+        values = list(bits)
+        for lo, hi in network:
+            if values[lo] > values[hi]:
+                values[lo], values[hi] = values[hi], values[lo]
+        assert values == sorted(values), f"{count} items, {bits} came out {values}"
+
+
+@pytest.mark.parametrize("count", range(2, 10))
+@pytest.mark.parametrize("seed", [0, 1, 2])
+def test_median_matches_numpy_including_the_even_case(count, seed):
+    """The masks this produces go into a depth map, so "faster" has to mean "identical".
+
+    Even windows are the interesting ones: they happen when a window is truncated at a clip
+    boundary, and they are the only case where the middle pair is averaged.
+    """
+    rng = np.random.default_rng(seed)
+    window = [rng.integers(0, 256, (23, 31), dtype=np.uint8) for _ in range(count)]
+    if seed == 1:  # lots of ties, where an off-by-one in the middle pair would hide
+        window = [rng.integers(0, 3, (23, 31), dtype=np.uint8) for _ in range(count)]
+
+    want = np.median(np.stack(window, axis=0), axis=0).astype(np.uint8)
+    got = smooth(window[count // 2], window, TemporalConfig(mode="median"))
+    assert got.dtype == np.uint8
+    assert np.array_equal(got, want)
+
+
+def test_smoothing_does_not_write_to_the_frames_it_was_given():
+    """The window is a shared buffer - the same arrays are the next frame's window too."""
+    rng = np.random.default_rng(3)
+    window = [rng.integers(0, 256, (16, 16), dtype=np.uint8) for _ in range(5)]
+    before = [frame.copy() for frame in window]
+
+    for mode in ("median", "max"):
+        smooth(window[2], window, TemporalConfig(mode=mode))
+        for original, now in zip(before, window):
+            assert np.array_equal(original, now), f"{mode} modified its input"
+
+
 def test_unknown_mode_is_rejected():
     with pytest.raises(ValueError):
         smooth(mask(0), [mask(0), mask(1)], TemporalConfig(mode="bogus"))
