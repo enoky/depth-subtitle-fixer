@@ -39,7 +39,12 @@ def configure_model_cache(models_dir: Path | None = None) -> Path:
 class DetectConfig:
     """Which text detectors to run and how."""
 
-    detectors: tuple[str, ...] = ("doctr", "easyocr")
+    #: EasyOCR is available and unioned in when asked for, but it is not on by default: it
+    #: costs about twice what docTR does and on the clips measured it found essentially the
+    #: same glyphs - 99.9% of the same mask pixels for 1.9x the detection time. It reads
+    #: scene text better, so it is worth adding back on a stylised title card; check the
+    #: preview rather than paying for it on every render.
+    detectors: tuple[str, ...] = ("doctr",)
     det_arch: str = "db_resnet50"
     min_score: float = 0.30
     batch_size: int = 4

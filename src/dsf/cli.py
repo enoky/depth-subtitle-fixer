@@ -68,7 +68,8 @@ def add_detect_args(p: argparse.ArgumentParser) -> None:
     g.add_argument("--profile", default="subtitles", choices=("subtitles", "credits", "both"),
                    help="preset tuned for static subtitles, scrolling credits, or both")
     g.add_argument("--detectors", type=lambda s: tuple(x.strip() for x in s.split(",")),
-                   help="comma separated: doctr,easyocr (default: both)")
+                   help="comma separated: doctr,easyocr (default: doctr; add easyocr for "
+                        "stylised title cards, at roughly double the detection time)")
     g.add_argument("--det-arch", choices=DOCTR_ARCHS,
                    help="docTR detection architecture (default: db_resnet50)")
     g.add_argument("--min-score", type=float, help="minimum detector confidence")

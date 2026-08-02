@@ -50,6 +50,23 @@ def test_detectors_parse_as_a_tuple():
     assert cfg.detect.detectors == ("doctr", "easyocr")
 
 
+def test_only_doctr_runs_unless_easyocr_is_asked_for():
+    """EasyOCR roughly doubles detection time for ~0.1% more mask on ordinary text.
+
+    It is better at stylised scene text, so it stays available - but as something you turn
+    on for a title card that needs it, not something every render pays for.
+    """
+    cfg = cfg_from(["fix", "--rgb", "a.mp4", "--depth", "b.mp4", "--out", "c.mp4"])
+    assert cfg.detect.detectors == ("doctr",)
+
+
+@pytest.mark.parametrize("profile", ["subtitles", "credits", "both"])
+def test_no_profile_quietly_switches_easyocr_back_on(profile):
+    cfg = cfg_from(["fix", "--rgb", "a.mp4", "--depth", "b.mp4", "--out", "c.mp4",
+                    "--profile", profile])
+    assert cfg.detect.detectors == ("doctr",)
+
+
 def test_numeric_flag_only_applies_when_given():
     base = cfg_from(["fix", "--rgb", "a", "--depth", "b", "--out", "c"])
     assert base.strokes.min_response == pytest.approx(0.05)

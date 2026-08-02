@@ -205,6 +205,31 @@ def test_the_render_result_is_reported_not_handed_back_as_a_file():
     assert "File" not in kinds, "a File output would reintroduce the cache-copy failure"
 
 
+def test_the_app_starts_with_only_doctr_ticked():
+    """The app builds its controls from the config, so this is really a check that it does.
+
+    A default that held on the command line but not in the app would mean the two disagree
+    about what a render costs, and the app is where the setting is actually seen.
+    """
+    from dsf.ui import Session, build_app
+
+    demo = build_app(Session(), native_dialogs=False)
+    groups = [b for b in demo.blocks.values()
+              if type(b).__name__ == "CheckboxGroup" and b.label == "Detectors"]
+    assert len(groups) == 1, "expected one Detectors control"
+    assert list(groups[0].value) == ["doctr"]
+    # easyocr stays offerable - the point is that it is opt-in, not gone.
+    assert "easyocr" in [c[1] if isinstance(c, tuple) else c for c in groups[0].choices]
+
+
+@pytest.mark.parametrize("profile", ["subtitles", "credits", "both"])
+def test_switching_profile_does_not_tick_easyocr_back_on(profile):
+    """Profiles rewrite every control, so they are the obvious way for this to regress."""
+    from dsf.controls import profile_defaults
+
+    assert list(profile_defaults(profile)["detectors"]) == ["doctr"]
+
+
 def test_load_always_repoints_the_output_at_the_pair_just_loaded(tmp_path):
     """Otherwise the previous clip's path survives into the next one.
 
