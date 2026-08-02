@@ -109,6 +109,55 @@ def test_heal_removes_the_smear_around_the_glyphs():
     assert int(out[39, 40]) == pytest.approx(502, abs=2), "glyph painted at 0.5 brightness"
 
 
+def _heal_whole_frame(depth, mask, smooth=0.0):
+    """What the heal computes with no window at all - the reference the crop must match."""
+    import cv2
+    from scipy.ndimage import distance_transform_edt
+
+    indices = distance_transform_edt(mask, return_distances=False, return_indices=True)
+    filled = depth[tuple(indices)]
+    if smooth > 0:
+        filled = np.where(mask, cv2.GaussianBlur(filled, (0, 0), float(smooth)), filled)
+    return np.where(mask, filled, depth).astype(np.float32)
+
+
+@pytest.mark.parametrize("mask_box,smooth", [
+    ((slice(40, 60), slice(10, 300)), 0.0),      # a subtitle band, the everyday case
+    ((slice(40, 60), slice(10, 300)), 4.0),      # blur wider than the band is tall
+    ((slice(100, 300), slice(100, 300)), 0.0),   # thick: sources further out than the window
+    ((slice(0, 4), slice(0, 4)), 0.0),           # against the frame corner
+    ((slice(2, 318), slice(2, 318)), 0.0),       # all but a 2px rim: the window must grow
+])
+def test_healing_in_a_window_matches_healing_the_whole_frame(mask_box, smooth):
+    """The window is an optimisation, so it has to be invisible in the result.
+
+    A distance transform costs its input and the text occupies a band, so the heal runs on
+    a window around the mask. That is only sound while every filled pixel finds its source
+    nearer than the window's own edge - these cases include one thick enough to force the
+    window to grow, and one wider than the blur.
+    """
+    rng = np.random.default_rng(0)
+    depth = (rng.random((320, 320)) * 900 + 64).astype(np.float32)
+    mask = np.zeros((320, 320), bool)
+    mask[mask_box] = True
+
+    got = heal_edt(depth, mask, smooth)
+    want = _heal_whole_frame(depth, mask, smooth)
+    assert np.array_equal(got, want), \
+        f"windowed heal differs by up to {np.abs(got - want).max()}"
+
+
+def test_healing_leaves_every_pixel_outside_the_mask_alone():
+    """Most of the frame is not text and must come back bit-identical."""
+    rng = np.random.default_rng(1)
+    depth = (rng.random((240, 400)) * 900 + 64).astype(np.float32)
+    mask = np.zeros((240, 400), bool)
+    mask[100:120, 50:350] = True
+
+    got = heal_edt(depth, mask, 2.0)
+    assert np.array_equal(got[~mask], depth[~mask])
+
+
 def test_region_scope_fills_whole_boxes():
     mask = np.zeros((32, 32), dtype=bool)
     mask[10, 10] = True

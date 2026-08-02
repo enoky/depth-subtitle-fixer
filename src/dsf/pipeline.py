@@ -131,18 +131,27 @@ def remembered(stream: Iterator[tuple[np.ndarray, np.ndarray, list[Detection]]],
         cv2.MORPH_ELLIPSE,
         (2 * max(1, cfg.temporal.prior_tolerance) + 1,) * 2)
 
-    for (shape_u8, level_u8, dets), window in sliding_window(stream, radius):
+    # How opaque a frame's text got is asked of every frame in every window it appears in -
+    # once per frame here instead, because a full-frame max over a twenty-one frame window
+    # cost more than the rest of the stage put together.
+    tagged = ((shape, level, dets, float(level.max())) for shape, level, dets in stream)
+
+    for (shape_u8, level_u8, dets, _), window in sliding_window(tagged, radius):
         found = (shape_u8 > 127).astype(np.uint8)
         if not found.any():
             yield shape_u8, level_u8, dets
             continue
 
         trusted = None
-        for other_shape, other_level, _ in window:
-            if float(other_level.max()) < confident_level:
+        for other_shape, _, _, peak in window:
+            if peak < confident_level:
                 continue
-            witness = other_shape > 127
-            trusted = witness if trusted is None else (trusted | witness)
+            if trusted is None:
+                trusted = other_shape > 127
+            else:
+                # Accumulated in place: `trusted | witness` built a new full-frame array
+                # for every member of the window.
+                trusted |= other_shape > 127
         if trusted is None or not trusted.any():
             # Nothing nearby is unambiguous - no grounds to overrule this frame.
             yield shape_u8, level_u8, dets
@@ -156,19 +165,21 @@ def remembered(stream: Iterator[tuple[np.ndarray, np.ndarray, list[Detection]]],
         # pieces out of the text, which is the very artefact this is meant to remove. The
         # bar for keeping a blob is therefore *any* real support, not most of it: a faint
         # frame's mask spills a little past where the solid frames put the text.
-        count, labels, stats, _ = cv2.connectedComponentsWithStats(found, 8)
         # Blobs are the unit of judgement, but the mask is soft - the antialiased skirt
         # around each stroke sits below the threshold and belongs to no blob at all. Each
         # of those pixels takes the verdict of the stroke it borders, because zeroing every
         # one of them would shave the edge off every glyph in the frame.
-        overlaps, areas = [], []
-        for label in range(1, count):
-            blob = labels == label
-            overlaps.append(float(allowed[blob].mean()))
-            areas.append(int(stats[label, cv2.CC_STAT_AREA]))
-        if not overlaps:
+        count, labels, stats, _ = cv2.connectedComponentsWithStats(found, 8)
+        areas = stats[1:count, cv2.CC_STAT_AREA]
+        if not areas.size:
             yield shape_u8, level_u8, dets
             continue
+        # Asked a blob at a time - `allowed[labels == label].mean()` - this reread the whole
+        # frame once per glyph. Counting the labels that fall inside the remembered shape
+        # answers it for every blob at once, and only over the pixels that are inside it;
+        # the areas to divide by were already counted while labelling.
+        inside = np.bincount(labels.ravel()[allowed.ravel()], minlength=count)[1:count]
+        overlaps = inside / np.maximum(areas, 1)
 
         # If the memory does not describe this frame at all, the text has moved and the
         # prior stands down rather than deleting it. This is what keeps scrolling credits
@@ -178,16 +189,14 @@ def remembered(stream: Iterator[tuple[np.ndarray, np.ndarray, list[Detection]]],
             yield shape_u8, level_u8, dets
             continue
 
-        keep = np.zeros(found.shape, np.uint8)
-        dropped = False
-        for label, overlap in enumerate(overlaps, start=1):
-            if overlap >= cfg.temporal.prior_min_support:
-                keep[labels == label] = 1
-            else:
-                dropped = True
-        if not dropped:
+        # Painted through a lookup indexed by label, so the frame is written once rather
+        # than once per blob kept.
+        verdict = np.zeros(count, np.uint8)
+        verdict[1:] = overlaps >= cfg.temporal.prior_min_support
+        if verdict[1:].all():
             yield shape_u8, level_u8, dets
             continue
+        keep = verdict[labels]
         yield np.where(cv2.dilate(keep, slack).astype(bool), shape_u8, np.uint8(0)), \
             level_u8, dets
 
