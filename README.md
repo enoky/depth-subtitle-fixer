@@ -39,6 +39,10 @@ That writes `samples/demo_rgb.mp4` (1080p, burned-in subtitles plus two in-scene
 must keep their real depth) and `samples/demo_depth.mp4` (a plausible 10-bit depth map with
 the depth wrecked and smeared over the subtitles).
 
+Add `--scan-demo` for a small folder of clips to point the scanner (below) at:
+`samples/scan_demo/rgb` holds one subtitled clip, one with scrolling credits and one
+carrying nothing but signage the camera photographed, with matching `_depth` maps alongside.
+
 ## Use
 
 ```bash
@@ -96,6 +100,79 @@ next to the source when you hit Load. Browse needs `tkinter` and is disabled beh
 `--share`, since the dialog would open on the machine running the server rather than the
 viewer's; paths can always be pasted instead.
 
+## Sorting a folder of clips
+
+Before fixing anything you usually need to know *which* clips need fixing. `scan_for_text.py`
+is a separate tkinter app that walks a folder of RGB clips, decides which carry burned-in
+subtitles or overlaid credits, and copies those into `rgb_with_text/` under an output folder
+you choose. Give it a depth folder too and each flagged clip's depth map - same name with
+`_depth` on the stem - is copied into `depth_with_text/` beside it.
+
+```bash
+.venv/Scripts/python scripts/scan_for_text.py
+```
+
+`RUN_scan.bat` does the same from a double-click. Nothing is re-encoded; files are copied
+byte for byte, and an existing destination is reported rather than overwritten.
+
+It detects nothing of its own - it runs the same pipeline `dsf fix` does, with
+`--scene-text keep`, and reads the detections that survive the gates. So a licence plate, a
+shop sign or a T-shirt logo does not flag a clip, for exactly the reasons described under
+*How it works* below.
+
+Each clip goes through up to three stages, and only pays for a stage if it got past the one
+before. That ordering is what makes a folder of 2500 clips finishable.
+
+1. **Sweep** - detection alone, on eight short clusters of consecutive frames spread across
+   the clip, at a reduced detector input size. No stroke extraction, no temporal filter, no
+   prior. A clip with nothing text-shaped in it stops here, which is most of a folder.
+2. **Confirm** - the full pipeline, on windows centred where the sweep actually found
+   something. This is the stage that separates an overlay from a shop sign.
+3. **Read** - the strongest confirmed frame goes to a recogniser, and the clip is only
+   flagged if something reads as an actual word.
+
+Stage 3 exists because stages 1 and 2 ask how a region *behaves* - does it hold still, hold
+its colour, sit where subtitles sit - and a railing, a window grid or a run of compression
+noise can answer yes to all of it. Asking what it *says* is what separates writing from
+structure. The words are recorded in `scan_report.csv` either way, so a verdict you disagree
+with can be argued with rather than guessed at.
+
+Several clips are scanned at once, sharing one set of models. Each worker spends most of its
+life waiting - on ffmpeg starting up, on decoding, on the disk - so a second and third fill
+the gaps the first leaves rather than competing for the GPU. Past three the GPU is saturated
+and more workers only cost memory. Results then arrive as they finish, so the log and the
+report are in completion order rather than the folder's.
+
+Measured on a mixed folder of eight 1080p clips of 480 frames: **112s to 19.5s, 5.7x**, with
+every verdict unchanged except a railing-and-window-grid clip that the old scan copied and
+this one correctly leaves behind. Staging accounts for most of it, concurrency for about
+1.5x on top. The gain scales with clip length, because it comes from not reading frames the
+old scan read blindly.
+
+- **Profile** - the same `subtitles` / `credits` / `both` presets, so a scan for subtitles
+  only looks in the lower band while `credits` follows text scrolling up the full frame.
+- **Verdict** - a clip is flagged once it accumulates enough frames carrying real overlay
+  text (default 6), including a run of consecutive ones (default 3), each covering more of
+  the frame than a stray speck would. One box on one frame is not a subtitle. The scan
+  stops on a clip the moment the bar is met.
+- **Sampling** - windows of *consecutive* frames, on purpose: the persistence gate decides
+  by looking at a detection's neighbours in time, and it is the gate that spares filmed
+  text. The sweep uses the same number of sample points as the confirm pass would, so brief
+  text is no likelier to be missed than before; raise *Sweep clusters* for long clips whose
+  titles appear only briefly. Tick *Scan every frame* for an exhaustive pass, which skips
+  the sweep entirely.
+- **Reading is Latin-script only** (docTR `crnn_vgg16_bn`, ~63 MB on first run). Turn
+  *Require the text to read as words* off for footage subtitled in Chinese, Japanese,
+  Korean, Cyrillic or Arabic - it would reject every clip otherwise. Clips that pass the
+  overlay gates but fail to read are reported as `rejected` rather than silently dropped,
+  so they are easy to review.
+- **Dry run** decides and reports without copying; *Skip clips already in the output* makes
+  an interrupted scan resumable; every decision and its evidence lands in `scan_report.csv`.
+
+If clips are still being copied that have no text in them, the report says which stage let
+each one through. Raise *Min word length* or *Min word conf.* to tighten the reader, and
+*Min text frames* / *Min coverage* to tighten the overlay gates.
+
 ## Commands
 
 | Command | What it does |
@@ -106,6 +183,7 @@ viewer's; paths can always be pasted instead.
 | `dsf fix` | detect + composite in one streaming pass |
 | `dsf preview` | contact sheets for chosen frames |
 | `dsf ui` | local Gradio app |
+| `scripts/scan_for_text.py` | tkinter app: sort a folder of clips into those with text and those without |
 
 ## Key options
 
@@ -182,6 +260,12 @@ viewer's; paths can always be pasted instead.
 Everything streams frame by frame, so clip length is limited by disk, not RAM. The depth
 luma plane is decoded in its source pixel format and written back untouched outside the
 mask - no colour-range rescale, no 8-bit round trip.
+
+Decoding runs a chunk ahead of detection on its own thread, because otherwise the two take
+turns: ffmpeg idles while the GPU works and the GPU idles while ffmpeg decodes. Measured on
+a 1080p clip the GPU was below 20% utilisation for 65% of the wall clock. The read-ahead
+depth is sized against the frame size rather than fixed, so the streaming promise holds at
+8K as well as at 720p.
 
 ## Notes
 
