@@ -8,6 +8,7 @@ pixels under the text mask are ever modified; chroma planes are passed through u
 
 from __future__ import annotations
 
+import functools
 import json
 import re
 import shutil
@@ -29,8 +30,14 @@ class FFmpegError(RuntimeError):
     pass
 
 
+@functools.lru_cache(maxsize=8)
 def _resolve(name: str) -> str:
-    """Find ffmpeg/ffprobe, falling back to the imageio-ffmpeg bundled binary."""
+    """Find ffmpeg/ffprobe, falling back to the imageio-ffmpeg bundled binary.
+
+    Cached because `shutil.which` walks every directory on PATH against every extension in
+    PATHEXT, which measured at 9.9ms a call on Windows. That is nothing once, and the single
+    largest line in a profile of code that opens a stream a few dozen times per clip.
+    """
     found = shutil.which(name)
     if found:
         return found
@@ -213,9 +220,15 @@ def _seek_args(info: VideoInfo, seek_frame: int) -> list[str]:
     return ["-ss", f"{max(0.0, (seek_frame - 0.5) / float(info.fps)):.6f}"]
 
 
-def read_rgb(path: str | Path, start: int = 0, seek_frame: int = 0) -> Iterator[np.ndarray]:
-    """Yield uint8 HxWx3 RGB frames. Colour conversion here is fine - it only feeds detection."""
-    info = probe(path)
+def read_rgb(path: str | Path, start: int = 0, seek_frame: int = 0,
+             info: VideoInfo | None = None) -> Iterator[np.ndarray]:
+    """Yield uint8 HxWx3 RGB frames. Colour conversion here is fine - it only feeds detection.
+
+    Pass *info* when the caller already has it. ffprobe costs ~75ms, which is nothing on one
+    long read and most of the bill for code that reopens the stream to sample short runs of
+    frames from all over a clip.
+    """
+    info = info or probe(path)
     cmd = [
         ffmpeg_exe(), "-nostdin", "-v", "error", *_seek_args(info, seek_frame),
         "-i", str(path),

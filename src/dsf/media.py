@@ -26,17 +26,19 @@ def probe(path: str | Path, fps: float = 24.0) -> VideoInfo:
 
 
 def read_rgb(path: str | Path, start: int = 0, seek_frame: int = 0,
-             max_frames: int | None = None) -> Iterator[np.ndarray]:
+             max_frames: int | None = None,
+             info: VideoInfo | None = None) -> Iterator[np.ndarray]:
     """Yield uint8 HxWx3 RGB frames.
 
     A sequence has no notion of seeking - skipping files *is* the seek - so the two
-    positioning arguments collapse into one offset.
+    positioning arguments collapse into one offset. *info* saves the video reader an ffprobe
+    when the caller already knows the stream.
     """
     if sequence.is_sequence(path):
         yield from sequence.read_rgb(path, start=start + seek_frame, max_frames=max_frames)
         return
     count = 0
-    for frame in videoio.read_rgb(path, start=start, seek_frame=seek_frame):
+    for frame in videoio.read_rgb(path, start=start, seek_frame=seek_frame, info=info):
         yield frame
         count += 1
         if max_frames is not None and count >= max_frames:
