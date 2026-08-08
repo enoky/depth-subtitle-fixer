@@ -20,6 +20,7 @@ from .detect import build_detectors
 from .detect.base import Detection, merge_detections
 from .filters import GeometryFilter, appearance_ok, persistence_ok, sliding_window
 from .media import is_sequence, open_depth_sink, probe, read_depth, read_rgb
+from .prefetch import depth_for, prefetch
 from .refine.strokes import AlphaPatch, compose_alpha, compose_levels, extract_patch
 from .temporal import from_u8, smooth, to_u8
 from .videoio import VideoInfo
@@ -59,9 +60,25 @@ def iter_frame_items(rgb_path: str, cfg: PipelineConfig, info: VideoInfo,
     every = max(1, cfg.detect.detect_every)
     chunk_size = max(1, cfg.detect.batch_size) * every
 
+    # Read ahead by up to a chunk, so ffmpeg decodes the next batch while this one is going
+    # through the detector instead of the two taking turns. Depth is sized against the frame
+    # size rather than fixed, because everything here streams on the promise that clip
+    # length is bounded by disk and not by RAM.
+    frames = prefetch(read_rgb(rgb_path, start=start, seek_frame=seek_frame, info=info),
+                      depth=depth_for(info.width, info.height, chunk_size))
+
+    try:
+        yield from _detect_chunks(frames, chunk_size, every, detectors, geometry, cfg,
+                                  max_frames, progress)
+    finally:
+        frames.close()
+
+
+def _detect_chunks(frames, chunk_size: int, every: int, detectors, geometry,
+                   cfg: PipelineConfig, max_frames: int | None,
+                   progress: ProgressFn | None) -> Iterator[FrameItem]:
     index = 0
     carry: tuple[list[Detection], list[AlphaPatch]] = ([], [])
-    frames = read_rgb(rgb_path, start=start, seek_frame=seek_frame)
 
     for chunk in _chunks(frames, chunk_size):
         if max_frames is not None and index >= max_frames:
