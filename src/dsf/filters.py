@@ -46,6 +46,10 @@ def sliding_window(iterable: Iterable, radius: int) -> Iterator[tuple]:
             pass
 
 
+#: Channel sum below which a pixel has no measurable hue - roughly 16/255 in each channel.
+_CHROMA_FLOOR = 48.0
+
+
 def luminance(rgb: np.ndarray) -> np.ndarray:
     """BT.709 luma in [0, 1] from a uint8 RGB image."""
     a = rgb.astype(np.float32)
@@ -94,17 +98,37 @@ def appearance_ok(frame: np.ndarray, det: Detection, cfg: FilterConfig) -> bool:
         return False
     crop = frame[y0:y1, x0:x1]
     lum = luminance(crop)
-    p50, p90, p95 = np.percentile(lum, (50, 90, 95))
-    if float(p95 - p50) < cfg.min_contrast:
+    p5, p10, p50, p90, p95 = np.percentile(lum, (5, 10, 50, 90, 95))
+
+    # Glyphs may be brighter than what they sit on or darker than it: a white subtitle over
+    # a night scene and a dark wordmark on a pale title card are both overlays. Measured
+    # only upwards, a dark-on-light card reads as the *background's* contrast and the
+    # *background's* colour - so a perfectly flat navy wordmark scored 0.02 where it needed
+    # 0.12, and was thrown away here before the stroke extractor, which decides polarity
+    # for itself, ever saw it.
+    if float(p95 - p50) >= float(p50 - p5):
+        contrast, glyphs = float(p95 - p50), crop[lum >= p90]
+    else:
+        contrast, glyphs = float(p50 - p5), crop[lum <= p10]
+    if contrast < cfg.min_contrast:
         return False
 
-    # Colour flatness, measured only on the brightest (candidate glyph) pixels.
-    bright = crop[lum >= p90].astype(np.float32)
-    if bright.size == 0:
+    # Colour flatness, measured on the candidate glyph pixels - whichever side those are.
+    sample = glyphs.astype(np.float32)
+    if sample.size == 0:
         return False
-    total = bright.sum(axis=1, keepdims=True)
-    total[total < 1.0] = 1.0
-    chroma = bright[:, :2] / total  # normalised r, g
+    total = sample.sum(axis=1)
+
+    # Chromaticity is a ratio, and a ratio between near-zero numbers is quantisation noise:
+    # a pixel of (1, 0, 0) is black, but reads as saturated red. Text dark enough to sit
+    # there scored a colour spread of 0.18 against a limit of 0.14 and was rejected for
+    # being multicoloured - which black is not. So hue is measured only where there is
+    # enough signal to have one, and glyphs too dark for that are simply black, which is as
+    # flat as a colour gets.
+    lit = total >= _CHROMA_FLOOR
+    if int(lit.sum()) < 8:
+        return True
+    chroma = sample[lit, :2] / total[lit][:, None]  # normalised r, g
     if float(chroma.std(axis=0).mean()) > cfg.max_chroma_std:
         return False
     return True

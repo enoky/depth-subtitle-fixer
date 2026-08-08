@@ -81,6 +81,48 @@ def test_appearance_rejects_a_low_contrast_region():
     assert not appearance_ok(frame, det(200, 150, 400, 200), FilterConfig())
 
 
+def _draw_strokes(frame, colour, rng=None, box=(150, 280, 450, 320)):
+    """Paint upright bars inside *box* - text is a minority of its own bounding box.
+
+    Filling the box outright leaves the crop with no background in it, and then there is no
+    contrast to measure in either direction.
+    """
+    x0, y0, x1, y1 = box
+    for x in range(x0 + 6, x1 - 6, 24):
+        block = frame[y0 + 6:y1 - 6, x:x + 8]
+        frame[y0 + 6:y1 - 6, x:x + 8] = (
+            colour if colour is not None
+            else rng.integers(0, 7, block.shape, dtype=np.uint8))
+    return frame
+
+
+def test_appearance_accepts_dark_text_on_a_light_card():
+    """Title cards put dark text on a pale background, and that is still an overlay.
+
+    Contrast was measured only upwards, as P95-P50, so a dark wordmark read as the spread
+    of the *background* - a flat navy logo scored 0.02 where it needed 0.12 - and the
+    colour check sampled the brightest pixels, which were the card rather than the text.
+    """
+    frame = np.full((H, W, 3), 230, dtype=np.uint8)
+    frame[..., 2] = 200                              # a pale, slightly warm card
+    _draw_strokes(frame, (20, 40, 120))              # flat dark blue wordmark
+    assert appearance_ok(frame, det(150, 280, 450, 320), FilterConfig())
+
+
+def test_appearance_accepts_text_too_dark_to_have_a_hue():
+    """Chromaticity is a ratio, and near-black pixels make it noise, not colour.
+
+    A pixel of (1, 0, 0) is black but normalises to pure red, so text that had faded to
+    almost black measured as wildly multicoloured - 0.18 against a limit of 0.14 - and was
+    rejected for being scenery. Black is as flat as a colour gets.
+    """
+    frame = np.full((H, W, 3), 210, dtype=np.uint8)
+    rng = np.random.default_rng(0)
+    frame[280:320, 150:450] = 210
+    _draw_strokes(frame, None, rng=rng)   # near-black strokes with ragged channel values
+    assert appearance_ok(frame, det(150, 280, 450, 320), FilterConfig())
+
+
 def test_appearance_rejects_multicoloured_text():
     """A rainbow sign is scenery; burned-in subtitles are one flat colour."""
     frame = np.full((H, W, 3), 20, dtype=np.uint8)
