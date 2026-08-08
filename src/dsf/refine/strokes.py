@@ -21,7 +21,7 @@ from dataclasses import dataclass
 
 import cv2
 import numpy as np
-from scipy.ndimage import binary_fill_holes
+from scipy.ndimage import binary_erosion, binary_fill_holes
 
 from ..config import StrokeConfig
 from ..detect.base import Detection
@@ -81,6 +81,12 @@ def estimate_background(lum: np.ndarray, k: int) -> np.ndarray:
     """
     k = max(3, int(k) | 1)
     u8 = np.clip(lum * 255.0, 0, 255).astype(np.uint8)
+    # Past twice the crop's shorter side the window is entirely border replication in that
+    # axis and tells you nothing the edge rows do not. It is also where OpenCV's
+    # constant-time median starts refusing outright - on a 101x472 crop it raised `k < 16`
+    # at 393, and where exactly it gives up depends on the values, not just the size. So
+    # this is a ceiling on what the crop can answer rather than a guess at that limit.
+    k = min(k, max(3, (2 * min(u8.shape) - 1) | 1))
     return cv2.medianBlur(u8, k).astype(np.float32) / 255.0
 
 
@@ -96,6 +102,24 @@ def _core(signal: np.ndarray) -> np.ndarray:
     thresh = _otsu(signal)
     core = signal > thresh
     return core if int(core.sum()) >= 8 else np.zeros(signal.shape, bool)
+
+
+def _solidify(shape: np.ndarray, threshold: float = 0.5) -> np.ndarray:
+    """Paint a glyph's body at full strength, leaving its antialiased edge soft.
+
+    The opacity model reads one text colour. A bevelled logotype has two - a dark edge and a
+    lighter core - so the core comes back as though the glyph were half transparent there,
+    and the corrupted depth underneath shows through in patches across every letter. The
+    glyph is not half transparent; it is two colours, and its body is entirely covered by
+    it. Measured on a real title card, a third of the body sat below 0.8 before this and an
+    eighth after.
+
+    Only pixels strictly inside the body are raised, so the boundary keeps the soft value
+    that stops the stamp ringing. Counters - the enclosed gaps in letters like D and O - are
+    background, lie outside the body, and are never touched.
+    """
+    body = binary_erosion(shape > threshold, np.ones((3, 3), bool), border_value=0)
+    return np.maximum(shape, body.astype(np.float32))
 
 
 def _centres(signal: np.ndarray) -> np.ndarray:
@@ -349,6 +373,11 @@ def extract_patch(frame: np.ndarray, det: Detection,
         return None
 
     shape = stats.shape * kept
+    # After the component filter, never before it: that filter asks how strong each blob is
+    # relative to the strongest text in the box, and filling a blob to 1 first would hand
+    # every speck the fade amplified the same answer as the text.
+    if cfg.solidify:
+        shape = _solidify(shape)
     if cfg.rim_expand > 0:
         grown = _expand_into_rim(shape > 0.5, stats.rim, cfg.rim_expand)
         shape = np.maximum(shape, grown.astype(np.float32))

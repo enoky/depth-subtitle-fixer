@@ -409,3 +409,74 @@ def test_the_strength_gate_keeps_solid_text_intact():
     strict = compose_alpha([_extract(frame, box, StrokeConfig(min_relative_strength=0.9))],
                            300, 900)
     assert float((strict[fill > 200] > 0.5).mean()) > 0.85
+
+
+def _bevelled_wordmark(w=520, h=150):
+    """A pale card carrying letters with a dark edge and a lighter core.
+
+    Real logotypes are shaded like this, and the opacity model reads one text colour, so
+    the two tones come back as two different opacities within a single solid letter.
+    """
+    frame = np.full((h, w, 3), 210, dtype=np.uint8)
+    frame[..., 2] = 180                                     # pale, slightly warm card
+    for x in range(40, w - 40, 70):
+        cv2.rectangle(frame, (x, 40), (x + 44, h - 40), (20, 40, 110), -1)      # dark edge
+        cv2.rectangle(frame, (x + 10, 50), (x + 34, h - 50), (70, 110, 170), -1)  # lighter core
+    return frame, (30, 30, w - 30, h - 30)
+
+
+def _body_of(patch):
+    """The inside of the glyphs, away from their antialiased edges."""
+    shape = patch.normalised
+    from scipy.ndimage import binary_fill_holes
+    solid = binary_fill_holes(shape > 0.5)
+    return cv2.erode(solid.astype(np.uint8), np.ones((7, 7), np.uint8)).astype(bool), shape
+
+
+def test_solidify_paints_a_two_tone_glyph_at_one_strength():
+    """Otherwise the lighter half of every letter is stamped as though half transparent.
+
+    The corrupted depth then shows through in patches across the wordmark, which is the
+    artefact this exists to remove.
+    """
+    frame, box = _bevelled_wordmark()
+    on = _extract(frame, box, StrokeConfig(polarity="dark"))
+    off = _extract(frame, box, StrokeConfig(polarity="dark", solidify=False))
+    assert on is not None and off is not None
+
+    body_off, shape_off = _body_of(off)
+    body_on, shape_on = _body_of(on)
+    assert body_off.any() and body_on.any()
+    uneven_off = float((shape_off[body_off] < 0.8).mean())
+    uneven_on = float((shape_on[body_on] < 0.8).mean())
+    assert uneven_off > 0.15, f"the fixture is not two-toned enough ({uneven_off:.0%})"
+    assert uneven_on < uneven_off / 2, \
+        f"solidify left {uneven_on:.0%} of the body faint, against {uneven_off:.0%} without it"
+
+
+def test_solidify_does_not_paint_the_hole_in_a_letter():
+    """The gap inside a D or an O is background and must keep its own depth."""
+    w, h = 320, 180
+    frame = np.full((h, w, 3), 210, dtype=np.uint8)
+    frame[..., 2] = 180
+    cv2.rectangle(frame, (60, 40), (260, 140), (20, 40, 110), -1)   # a ring...
+    cv2.rectangle(frame, (85, 60), (235, 120), (210, 210, 180), -1)  # ...around a counter
+    patch = _extract(frame, (30, 20, 290, 160), StrokeConfig(polarity="dark"))
+    assert patch is not None
+    # patch coordinates: the crop starts pad px outside the box
+    counter = patch.alpha[60:100, 85:175]
+    assert float(counter.max()) < 0.3, \
+        f"the counter was painted at {counter.max():.2f}"
+
+
+def test_a_background_window_larger_than_the_crop_does_not_blow_up():
+    """OpenCV's constant-time median refuses very large kernels, and where it gives up
+    depends on the pixel values rather than only on the size."""
+    from dsf.refine.strokes import estimate_background
+
+    rng = np.random.default_rng(0)
+    for shape in ((101, 472), (40, 90), (7, 900)):
+        lum = (rng.random(shape) * 0.2 + 0.7).astype(np.float32)
+        for k in (3, 51, 401, 4001):
+            out = estimate_background(lum, k)
+            assert out.shape == lum.shape

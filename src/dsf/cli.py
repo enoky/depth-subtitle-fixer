@@ -42,6 +42,7 @@ ARG_MAP: list[tuple[str, str, str]] = [
     ("min_response", "strokes", "min_response"),
     ("min_relative_strength", "strokes", "min_relative_strength"),
     ("background_scale", "strokes", "background_scale"),
+    ("solidify", "strokes", "solidify"),
     ("luma_tol", "strokes", "luma_tol"),
     ("rim_expand", "strokes", "rim_expand"),
     ("temporal", "temporal", "mode"),
@@ -104,6 +105,9 @@ def add_detect_args(p: argparse.ArgumentParser) -> None:
     g.add_argument("--background-scale", type=float,
                    help="background window as a fraction of text height; raise it if heavy "
                         "or bold text comes back hollow (default 0.9)")
+    g.add_argument("--solidify", action=argparse.BooleanOptionalAction, default=None,
+                   help="paint each glyph body at full strength (default on); --no-solidify "
+                        "keeps the raw per-pixel opacity, for genuinely translucent text")
     g.add_argument("--luma-tol", type=float,
                    help="colour tolerance when following a glyph's outline (fill uses opacity)")
     g.add_argument("--rim-expand", type=int,

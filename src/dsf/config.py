@@ -91,9 +91,10 @@ class StrokeConfig:
     #: and as a fraction of the detected text height, so 4K credits are not rejected
     max_stroke_frac: float = 0.45
     #: background-median window as a fraction of text height. It has to be wide enough that
-    #: the writing is a *minority* of the window - roughly a whole letter across. Sized off a
-    #: stroke instead, a bold word wins its own median, its interior reads as background, and
-    #: the word comes back hollow or vanishes outright.
+    #: the writing is a *minority* of the window - well over a whole letter across. Sized off
+    #: a stroke instead, a bold word wins its own median, its interior reads as background,
+    #: and the word comes back hollow or vanishes outright. A bold, tightly-set logotype
+    #: outvoted its own median at 0.90 and came back with holes bitten out of every letter.
     background_scale: float = 0.90
     #: minimum residual for a crop to contain text at all
     min_response: float = 0.05
@@ -110,6 +111,12 @@ class StrokeConfig:
     enclosure_margin: float = 0.15
     #: and how much must actually be contained for the test to count as evidence at all
     enclosure_min: float = 0.50
+    #: Paint each glyph body at full strength instead of at whatever opacity its colour
+    #: implies. The opacity model reads one text colour, so a bevelled logotype - a dark
+    #: edge around a lighter core - comes back looking half transparent through the middle
+    #: of every letter, and the corrupted depth shows through there. Off restores the raw
+    #: per-pixel opacity, which is what genuinely translucent text wants.
+    solidify: bool = True
     #: px the mask grows from the glyph core into a hard drawn outline. Off by default:
     #: it is only safe when the outline really is hard-edged, and growing into the soft drop
     #: shadow that title cards usually carry leaves a speckled crust on every glyph.

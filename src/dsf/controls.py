@@ -94,6 +94,8 @@ KNOBS: list[Knob] = [
     _k("min_relative_strength", "strokes", "min_relative_strength", "strokes_adv",
        "Min strength vs strongest text", "slider", minimum=0.0, maximum=1.0, step=0.05,
        info="drops specks picked up from the scene part-way through a fade"),
+    _k("solidify", "strokes", "solidify", "strokes_adv", "Solidify glyph bodies", "checkbox",
+       info="fills bevelled or two-tone logotypes that come back half transparent"),
     _k("rim_expand", "strokes", "rim_expand", "strokes_adv", "Grow into outline (px)",
        "slider", minimum=0, maximum=10, step=1,
        info="only for hard drawn outlines; on shadowed text it speckles the glyphs"),
