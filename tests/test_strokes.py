@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import cv2
 import numpy as np
+import pytest
 
 from conftest import draw_subtitle, draw_subtitle_full, gradient_background, text_bbox
 from dsf.config import StrokeConfig
@@ -480,3 +481,38 @@ def test_a_background_window_larger_than_the_crop_does_not_blow_up():
         for k in (3, 51, 401, 4001):
             out = estimate_background(lum, k)
             assert out.shape == lum.shape
+
+
+@pytest.mark.xfail(reason="known open bug: the polarity decision is decided by a magnitude "
+                          "shortcut whose threshold (ratio 0.625) sits on top of the value "
+                          "outlined text produces (0.622), so which side it lands on turns "
+                          "on how tightly the line was cropped. Two reorderings were tried "
+                          "and both traded this for dropping bold unoutlined credits - see "
+                          "the commit that added this test.",
+                   strict=True)
+def test_outlined_text_resolves_to_its_fill_however_the_box_is_cropped():
+    """White-on-black-outline is the commonest subtitle style, and it used to invert.
+
+    An outline sits between the fill and the background, so it answers the opposite sign
+    louder than the writing does - the ratio measured 0.622 against a 0.625 cut-off. Which
+    side of that it landed on depended on how tightly the detector had cropped the line, so
+    the same subtitle came back as its letters at one box size and as the hollow ring around
+    them at the next, and the depth plane was stamped onto the ring.
+    """
+    bg = gradient_background(640, 360)
+    frame, fill, full = draw_subtitle_full(bg, "HELLO WORLD", font_size=36)
+    x0, y0, x1, y1 = text_bbox(fill)
+    fill_mask = fill > 200
+    outline = (full > 0) & ~fill_mask
+
+    for margin in (4, 8, 12, 16, 24, 32):
+        for scale in (0.9, 1.5):
+            patch = _extract(frame, (x0 - margin, y0 - margin, x1 + margin, y1 + margin),
+                             StrokeConfig(background_scale=scale))
+            assert patch is not None, f"nothing found at margin {margin}, scale {scale}"
+            alpha = compose_alpha([patch], frame.shape[0], frame.shape[1])
+            on_fill = float(alpha[fill_mask].mean())
+            on_outline = float(alpha[outline].mean())
+            assert on_fill > on_outline, (
+                f"margin {margin}, background_scale {scale}: the mask followed the outline "
+                f"({on_outline:.2f}) instead of the fill ({on_fill:.2f})")
