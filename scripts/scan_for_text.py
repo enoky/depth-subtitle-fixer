@@ -337,6 +337,33 @@ class Level:
 
 
 @dataclass(frozen=True)
+class Size:
+    """How tall a region has to be before it could be subtitle or credit text.
+
+    Text meant to be read at viewing distance is a good fraction of the frame; the specks
+    the detector reports on a patch of gravel or a compression artefact are not, and they
+    are the ones a recogniser is most likely to hallucinate a word out of. Two floors,
+    because "too small" means two different things: too small *for the frame* is not styled
+    like an overlay at all, and too small *in pixels* cannot be read whatever the frame is.
+    On a folder of mixed resolutions they bind on different clips.
+
+    This is the gate `dsf.filters.GeometryFilter` already applies, raised for the scan
+    alone. `dsf fix` keeps the pipeline's own 1.2%: there the question is what to paint
+    over, and painting over a small piece of text costs far less than leaving the depth
+    under it wrecked. Here the question is whether a clip is worth copying at all.
+    """
+
+    #: Fraction of frame height. 0 leaves the pipeline's own floor alone. Deliberately well
+    #: below a subtitle, which runs 4-6% - the smallest legal print at the bottom of a
+    #: credit roll is around 2%, and losing a credits clip is worse than looking at one.
+    #: Raise it towards 0.04 if only dialogue subtitles matter.
+    min_height: float = 0.02
+    #: Absolute floor, for clips small enough that the fraction is generous. Below this a
+    #: glyph is a handful of pixels and the recogniser is reading noise.
+    min_pixels: int = 14
+
+
+@dataclass(frozen=True)
 class Thresholds:
     """What it takes for a clip to count as carrying overlay text."""
 
@@ -414,6 +441,10 @@ class ClipResult:
     #: Regions thrown out for sloping. A clean verdict with a large count here is a clip
     #: full of railings, not a clip the scan missed something in.
     tilted: int = 0
+    #: The height bar that was applied, in pixels of this clip. Recorded rather than counted
+    #: because the gate runs inside the pipeline, and it is the bar that makes a clean
+    #: verdict readable: "nothing found" means nothing found *above this*.
+    min_text_px: int = 0
     elapsed: float = 0.0
     error: str = ""
 
@@ -423,7 +454,8 @@ class ClipResult:
             return self.error
         if self.stage == "swept":
             of = f" of {self.swept_of}" if self.swept_of else ""
-            return f"nothing text-shaped in {self.swept_frames}{of} swept frames"
+            bar = f" (nothing under {self.min_text_px}px counted)" if self.min_text_px else ""
+            return f"nothing text-shaped in {self.swept_frames}{of} swept frames{bar}"
         detail = (f"{self.text_frames}/{self.frames_scanned} frames, run {self.longest_run}, "
                   f"peak {self.peak_coverage:.2e}")
         if self.tilted:
@@ -454,6 +486,21 @@ def build_scan_config(profile: str, detect_every: int = 0, batch_size: int = 4,
     cfg = replace(cfg, detect=replace(cfg.detect, **updates))
     assert cfg.filters.scene_text == "keep"
     return cfg
+
+
+def with_size_floor(cfg: PipelineConfig, size: Size, frame_height: int) -> PipelineConfig:
+    """*cfg* with the shortest text the scan will look at raised to *size*.
+
+    Set on the config rather than checked in the scan loop, because the gate it raises is
+    one the pipeline already applies - to the sweep as well as to the confirm pass, so a
+    clip whose only text is too small is dropped at the cheap stage instead of being
+    escalated and then discarded. The floor is per clip because the pixel half of it is,
+    and a folder is rarely one resolution.
+    """
+    floor = max(float(size.min_height), size.min_pixels / max(1, int(frame_height)))
+    if floor <= cfg.filters.min_text_height:
+        return cfg
+    return replace(cfg, filters=replace(cfg.filters, min_text_height=floor))
 
 
 def _batches(frames: Iterable, size: int) -> Iterator[list]:
@@ -899,7 +946,7 @@ def scan_clip(clip: Clip, cfg: PipelineConfig, detectors: Sequence,
               thresholds: Thresholds, windows: int = 8, window_len: int = 45,
               exhaustive: bool = False, sweep: Sweep | None = None,
               reader: "WordReader | None" = None, reading: Reading | None = None,
-              level: Level | None = None,
+              level: Level | None = None, size: Size | None = None,
               cancel: threading.Event | None = None,
               on_progress: Callable[[int, int, str], None] | None = None) -> ClipResult:
     """Decide whether one clip carries overlay text, cheapest question first.
@@ -913,6 +960,7 @@ def scan_clip(clip: Clip, cfg: PipelineConfig, detectors: Sequence,
 
     reading = reading or Reading()
     level = level or Level()
+    size = size or Size()
     started = time.monotonic()
     result = ClipResult(clip=clip)
     try:
@@ -922,6 +970,10 @@ def scan_clip(clip: Clip, cfg: PipelineConfig, detectors: Sequence,
         result.error = f"{type(exc).__name__}: {exc}"
         result.elapsed = time.monotonic() - started
         return result
+
+    # Both stages read the floor off the config, so it has to be set before either runs.
+    cfg = with_size_floor(cfg, size, info.height)
+    result.min_text_px = int(round(cfg.filters.min_text_height * info.height))
 
     def progress(stage: str):
         if on_progress is None:
@@ -1092,13 +1144,15 @@ class ScanOptions:
     sweep: Sweep | None = field(default_factory=Sweep)
     reading: Reading = field(default_factory=Reading)
     level: Level = field(default_factory=Level)
+    size: Size = field(default_factory=Size)
     workers: int = DEFAULT_WORKERS
 
 
 REPORT_COLUMNS = ["clip", "verdict", "stage", "swept_frames", "sweep_hits",
                   "frames_scanned", "text_frames", "longest_run", "peak_coverage",
-                  "tilted_regions", "words", "first_hits", "elapsed_s", "rgb_action",
-                  "rgb_dest", "depth_source", "depth_status", "depth_action", "error"]
+                  "tilted_regions", "min_text_px", "words", "first_hits", "elapsed_s",
+                  "rgb_action", "rgb_dest", "depth_source", "depth_status", "depth_action",
+                  "error"]
 
 
 def run_scan(options: ScanOptions, post: Callable[[tuple], None],
@@ -1188,6 +1242,16 @@ def run_scan(options: ScanOptions, post: Callable[[tuple], None],
     else:
         log("level check off - sloping text counts the same as level text")
 
+    # Shown against 1080p because the floor is per clip and a folder is rarely one size.
+    example = with_size_floor(cfg, options.size, 1080).filters.min_text_height
+    if example > cfg.filters.min_text_height:
+        log(f"text must be {options.size.min_height * 100:.1f}% of frame height or "
+            f"{options.size.min_pixels}px tall, whichever is more - "
+            f"{int(round(example * 1080))}px on a 1080p clip, from the sweep onwards")
+    else:
+        log(f"size floor left at the pipeline's own "
+            f"{cfg.filters.min_text_height * 100:.1f}% of frame height")
+
     # Loaded up front rather than on the first clip that needs it, so a missing recogniser
     # is reported in the first seconds of a scan instead of an hour into one.
     reader = None
@@ -1242,7 +1306,7 @@ def run_scan(options: ScanOptions, post: Callable[[tuple], None],
                          windows=options.windows, window_len=options.window_len,
                          exhaustive=options.exhaustive, sweep=options.sweep,
                          reader=reader, reading=options.reading, level=options.level,
-                         cancel=cancel, on_progress=progress)
+                         size=options.size, cancel=cancel, on_progress=progress)
 
     totals = {"text": 0, "rejected": 0, "clean": 0, "error": 0, "skipped": 0, "cancelled": 0}
     started = time.monotonic()
@@ -1349,6 +1413,7 @@ def _write_row(writer, handle, result: ClipResult, rgb_action: str = "",
         "longest_run": result.longest_run,
         "peak_coverage": f"{result.peak_coverage:.6e}",
         "tilted_regions": result.tilted,
+        "min_text_px": result.min_text_px,
         "first_hits": " ".join(str(h) for h in result.hits),
         "elapsed_s": f"{result.elapsed:.2f}",
         "rgb_action": rgb_action,
@@ -1402,6 +1467,7 @@ class ScannerApp:
             "min_confidence": tk.StringVar(value="0.45"),
             "require_level": tk.BooleanVar(value=True),
             "max_tilt": tk.StringVar(value="8"),
+            "min_text_height": tk.StringVar(value="2.0"),
             "windows": tk.StringVar(value="8"),
             "window_len": tk.StringVar(value="45"),
             "min_text_frames": tk.StringVar(value="6"),
@@ -1503,6 +1569,10 @@ class ScannerApp:
         ttk.Label(frame, text="Max tilt (deg)").grid(row=6, column=2, sticky="w", padx=(0, 6))
         ttk.Entry(frame, textvariable=self.vars["max_tilt"], width=10
                   ).grid(row=6, column=3, sticky="w", pady=3)
+        ttk.Label(frame, text="Min text height %").grid(row=6, column=4, sticky="w",
+                                                        padx=(0, 6))
+        ttk.Entry(frame, textvariable=self.vars["min_text_height"], width=10
+                  ).grid(row=6, column=5, sticky="w", pady=3)
 
         ttk.Separator(frame, orient="horizontal").grid(row=7, column=0, columnspan=6,
                                                        sticky="ew", pady=(8, 4))
@@ -1528,7 +1598,11 @@ class ScannerApp:
             "time. 'Detect every Nth' of 0 keeps the profile's own value. The level check "
             "asks which way the ink runs and throws away anything sloping: subtitles and "
             "credits are composited square to the frame, while the railings and window "
-            "frames that get this far are square to nothing."
+            "frames that get this far are square to nothing. 'Min text height' is a "
+            "percentage of frame height and applies from the sweep onwards - a subtitle "
+            "runs 4-6%, the small print at the end of a credit roll about 2%, and the "
+            "specks a detector finds on gravel are well under 1%. 0 keeps the pipeline's "
+            "own 1.2%."
         ), wraplength=1000, justify="left").grid(row=11, column=0, columnspan=6, sticky="w",
                                                  pady=(6, 0))
 
@@ -1645,6 +1719,7 @@ class ScannerApp:
                 "min_chars": int(self.vars["min_chars"].get()),
                 "min_confidence": float(self.vars["min_confidence"].get()),
                 "max_tilt": float(self.vars["max_tilt"].get()),
+                "min_text_height": float(self.vars["min_text_height"].get()),
                 "workers": int(self.vars["workers"].get()),
             }
         except ValueError as exc:
@@ -1683,6 +1758,9 @@ class ScannerApp:
                             min_confidence=numbers["min_confidence"]),
             level=Level(require=self.vars["require_level"].get(),
                         max_tilt=max(0.0, numbers["max_tilt"])),
+            # The box is a percentage because that is the unit the number is readable in;
+            # everything past here is a fraction, as the pipeline's own gate is.
+            size=Size(min_height=max(0.0, numbers["min_text_height"]) / 100.0),
             workers=numbers["workers"],
         )
 

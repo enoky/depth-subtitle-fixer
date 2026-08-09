@@ -207,17 +207,28 @@ old scan read blindly.
   than turning it off outright. Regions too small or too narrow to have a baseline - a lone
   glyph, a single stroke - are passed through unjudged rather than guessed at, and so are
   regions whose ink has no direction at all, like a solid block or a patch of noise.
+- **Big enough to read** - *Min text height %* sets the shortest region the scan will
+  consider, as a percentage of frame height, with an absolute floor of 14px underneath it
+  for small clips. The default 2% works out at 43px on 4K, 22px on 1080p and 14px from 720p
+  down, where the pixel floor takes over. A subtitle runs 4-6% and the small print at the
+  end of a credit roll about 2%, so the default sits just under the smallest text worth
+  finding; raise it towards 4% if only dialogue subtitles matter. This is the pipeline's own
+  `min_text_height` gate raised for the scan alone - `dsf fix` keeps its 1.2%, because
+  painting over small text costs far less than leaving the depth under it wrecked. It
+  applies from the sweep onwards, so a clip whose only text is too small is dropped at the
+  cheap stage rather than escalated and then discarded. 0 keeps the pipeline's own value.
 - **Dry run** decides and reports without copying; *Skip clips already in the output* makes
   an interrupted scan resumable; every decision and its evidence lands in `scan_report.csv`.
 
 If clips are still being copied that have no text in them, the report says which stage let
 each one through. Raise *Min word length* or *Min word conf.* to tighten the reader, lower
-*Max tilt* to insist on straighter text, and raise *Min text frames* / *Min coverage* to
-tighten the overlay gates.
+*Max tilt* to insist on straighter text, raise *Min text height %* to ignore smaller
+specks, and raise *Min text frames* / *Min coverage* to tighten the overlay gates.
 
-If clips with real subtitles are being left behind, check `tilted_regions` in the report
-first: a large count on a clip you expected to be flagged means the level check is reading
-the text as sloped, and *Max tilt* wants raising.
+If clips with real subtitles are being left behind, check `tilted_regions` and `min_text_px`
+in the report first: a large tilt count on a clip you expected to be flagged means the level
+check is reading the text as sloped and *Max tilt* wants raising, and `min_text_px` says how
+tall a region had to be on that clip to be looked at at all.
 
 ## Commands
 

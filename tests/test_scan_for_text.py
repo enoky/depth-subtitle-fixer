@@ -728,6 +728,52 @@ def test_the_profile_sets_the_gates_and_explicit_knobs_win():
     assert scan.build_scan_config("credits", detect_every=0).detect.detect_every == 1
 
 
+# --------------------------------------------------------------------------- text size
+
+def test_the_scan_asks_for_taller_text_than_the_fixer_does():
+    """Raised for the scan alone. `dsf fix` still paints over text this would ignore."""
+    from dsf.config import PipelineConfig
+
+    base = scan.build_scan_config("subtitles")
+    raised = scan.with_size_floor(base, scan.Size(), frame_height=1080)
+    assert raised.filters.min_text_height > base.filters.min_text_height
+    assert PipelineConfig().filters.min_text_height == base.filters.min_text_height
+
+
+def test_the_floor_is_the_taller_of_the_fraction_and_the_pixels():
+    size = scan.Size(min_height=0.02, min_pixels=14)
+    cfg = scan.build_scan_config("subtitles")
+
+    # 1080p: 2% is 21.6px, well past the pixel floor, so the fraction decides.
+    assert scan.with_size_floor(cfg, size, 1080).filters.min_text_height == \
+        pytest.approx(0.02)
+    # 360p: 2% is 7.2px, which reads nothing, so the pixel floor takes over.
+    assert scan.with_size_floor(cfg, size, 360).filters.min_text_height == \
+        pytest.approx(14 / 360)
+
+
+def test_asking_for_nothing_leaves_the_pipeline_alone():
+    """0 is 'keep the profile's own value', as it is for detect_every."""
+    cfg = scan.build_scan_config("subtitles")
+    assert scan.with_size_floor(cfg, scan.Size(0.0, 0), 1080) is cfg
+    # And a floor below the pipeline's own is not a way to *lower* it.
+    assert scan.with_size_floor(cfg, scan.Size(0.001, 1), 1080) is cfg
+
+
+def test_the_floor_reaches_the_gate_that_enforces_it():
+    """The knob is only worth having if GeometryFilter actually reads it."""
+    from dsf.detect.base import Detection, bbox_to_poly
+    from dsf.filters import GeometryFilter
+
+    cfg = scan.with_size_floor(scan.build_scan_config("credits"), scan.Size(), 1080)
+    gate = GeometryFilter(cfg.filters, 1920, 1080)
+    subtitle = Detection(poly=bbox_to_poly(600, 900, 1320, 950))   # 50px, ~4.6%
+    speck = Detection(poly=bbox_to_poly(600, 900, 700, 916))       # 16px, ~1.5%
+    assert gate.keep(subtitle) and not gate.keep(speck)
+    # That speck is exactly what the unraised pipeline would have kept.
+    assert GeometryFilter(scan.build_scan_config("credits").filters, 1920, 1080).keep(speck)
+
+
 def test_easyocr_is_unioned_in_only_when_asked():
     assert scan.build_scan_config("both").detect.detectors == ("doctr",)
     assert scan.build_scan_config("both", use_easyocr=True).detect.detectors == \
@@ -779,30 +825,25 @@ def test_the_window_builds_and_the_queue_reaches_it(tmp_path, monkeypatch):
         # `finished` clears whatever was still in flight.
         assert app.clip_bar["value"] == 0 and app.inflight == {}
 
-        app._save_settings()
-        assert "profile" in (tmp_path / "settings.json").read_text(encoding="utf-8")
-    finally:
-        root.destroy()
-
-
-@pytest.mark.skipif(scan.tk is None, reason="this Python has no tkinter")
-def test_the_boxes_reach_the_options_the_scan_actually_runs_on(tmp_path, monkeypatch):
-    """Every widget is a knob on something, and a knob wired to nothing is worse than none."""
-    monkeypatch.setattr(scan, "SETTINGS_PATH", tmp_path / "settings.json")
-    try:
-        root = scan.tk.Tk()
-    except scan.tk.TclError as exc:
-        pytest.skip(f"no display available: {exc}")
-    try:
-        app = scan.ScannerApp(root)
+        # Every box is a knob on something, and a knob wired to nothing is worse than no
+        # knob. Checked in this test rather than its own because a second Tk root cannot be
+        # built after the first has been destroyed.
         app.vars["rgb"].set(str(tmp_path))
         app.vars["out"].set(str(tmp_path / "out"))
         app.vars["max_tilt"].set("12.5")
+        app.vars["min_text_height"].set("3.5")
         options = app._collect()
         assert options.level == scan.Level(require=True, max_tilt=12.5)
+        # The box is a percentage; everything past it is a fraction.
+        assert options.size.min_height == pytest.approx(0.035)
 
         app.vars["require_level"].set(False)
-        assert not app._collect().level.require
+        app.vars["require_words"].set(False)
+        relaxed = app._collect()
+        assert not relaxed.level.require and not relaxed.reading.require
+
+        app._save_settings()
+        assert "profile" in (tmp_path / "settings.json").read_text(encoding="utf-8")
     finally:
         root.destroy()
 
