@@ -21,6 +21,7 @@ from __future__ import annotations
 import contextlib
 import csv
 import json
+import math
 import queue
 import shutil
 import sys
@@ -29,6 +30,7 @@ import time
 import traceback
 from concurrent.futures import ThreadPoolExecutor, as_completed
 from dataclasses import dataclass, field, replace
+from functools import lru_cache
 from pathlib import Path
 from typing import Callable, Iterable, Iterator, Sequence
 
@@ -289,6 +291,52 @@ class Reading:
 
 
 @dataclass(frozen=True)
+class Level:
+    """Overlay text runs along the screen. Writing that slopes was filmed, not added.
+
+    Subtitles and credits are composited against the frame's own axes, so their baselines
+    are level to a fraction of a degree - every time, in every clip. Almost nothing else in
+    a frame is: the railings, window frames, roof edges and reflections that get this far
+    did so by being straight and holding still, and they are straight at whatever angle the
+    camera happened to see them from. Asking which way the ink runs throws those away at no
+    cost to a real subtitle.
+
+    Measured on the finished mask rather than on the detection box, because the detector is
+    run with `assume_straight_pages=True` and its boxes are axis-aligned whatever they
+    contain - a sloping line of writing simply fills its box corner to corner.
+    """
+
+    require: bool = True
+    #: Degrees of slope tolerated. Generous next to the fraction of a degree a compositor
+    #: introduces, because the reading is taken from a mask a few dozen pixels tall and the
+    #: angles are searched on a coarse grid.
+    max_tilt: float = 8.0
+    #: How much better a sloping reading must explain the ink than a level one before the
+    #: region is called sloped. Ink that is a blob rather than writing scores much the same
+    #: at every angle, and this is what stops the winner of that near-tie being believed.
+    #: It is also what spares short words, which is what sets the value: three glyphs of
+    #: steep italic win their best angle by 18% - because a three-letter box is mostly lean
+    #: and hardly any baseline - and the same word actually turned by fifteen degrees wins
+    #: by 20%. A sloping railing wins by several hundred percent, and a level subtitle by
+    #: nothing at all, so only the short-word case is anywhere near the line. It is set
+    #: above the italics rather than below the turns: a subtitle wrongly thrown away is a
+    #: clip that never gets fixed, where one wrongly kept is a clip you look at and skip.
+    margin: float = 1.20
+    #: Width over height a region needs before it is judged at all. One glyph has no
+    #: baseline to read and a lone "I" measures as vertical, so a box narrower than this is
+    #: passed through unjudged rather than guessed at - a line of subtitles always brings
+    #: wider words with it. Below 1.0 because a line of writing turned steeply enough fills
+    #: a box taller than it is wide, and that is exactly the case worth catching.
+    min_aspect: float = 0.8
+    #: Floors below which there is nothing to measure, in pixels of mask.
+    min_height: int = 8
+    min_ink: int = 60
+    #: Ink pixels the angle is measured from. Concentration is a statistic and a few
+    #: thousand samples settle it, so a 4K credit roll costs the same as a 720p subtitle.
+    max_ink: int = 4000
+
+
+@dataclass(frozen=True)
 class Thresholds:
     """What it takes for a clip to count as carrying overlay text."""
 
@@ -363,6 +411,9 @@ class ClipResult:
     peak_coverage: float = 0.0
     hits: list[int] = field(default_factory=list)
     words: list[str] = field(default_factory=list)
+    #: Regions thrown out for sloping. A clean verdict with a large count here is a clip
+    #: full of railings, not a clip the scan missed something in.
+    tilted: int = 0
     elapsed: float = 0.0
     error: str = ""
 
@@ -375,6 +426,8 @@ class ClipResult:
             return f"nothing text-shaped in {self.swept_frames}{of} swept frames"
         detail = (f"{self.text_frames}/{self.frames_scanned} frames, run {self.longest_run}, "
                   f"peak {self.peak_coverage:.2e}")
+        if self.tilted:
+            detail += f", {self.tilted} sloped"
         if self.words:
             detail += f" | read {' '.join(self.words[:4])!r}"
         elif self.verdict == "rejected":
@@ -685,6 +738,19 @@ class WordReader:
         return out
 
 
+def one_character_over_and_over(text: str) -> bool:
+    """Is this the same character repeated - "111", "XXX", "000" - and nothing else?
+
+    A recogniser handed a region with no writing in it still answers. Regular structure is
+    what it answers with: the bars of a fireplace grill come back as "111", a run of railings
+    as "IIII", a row of rivets as "000", each as long and as confident as a real word and so
+    invisible to the length and confidence rules. No word is one character repeated, so
+    reading as one is grounds on its own to throw the region away.
+    """
+    letters = [c for c in text.casefold() if c.isalnum()]
+    return len(letters) >= 2 and len(set(letters)) == 1
+
+
 def legible(words: Sequence[tuple[str, float]], reading: Reading) -> list[str]:
     """The words long enough and confident enough to be writing rather than an artefact.
 
@@ -694,8 +760,11 @@ def legible(words: Sequence[tuple[str, float]], reading: Reading) -> list[str]:
     kept = []
     for text, confidence in words:
         letters = sum(1 for c in text if c.isalnum())
-        if letters >= max(1, reading.min_chars) and confidence >= reading.min_confidence:
-            kept.append(text)
+        if letters < max(1, reading.min_chars) or confidence < reading.min_confidence:
+            continue
+        if one_character_over_and_over(text):
+            continue
+        kept.append(text)
     return kept
 
 
@@ -729,10 +798,108 @@ def read_evidence(clip: Clip, candidates: Sequence[tuple[int, list]], reader: "W
     return [], everything
 
 
+@lru_cache(maxsize=8)
+def _tilt_grid(max_tilt: float) -> tuple[tuple[float, float], ...]:
+    """``(degrees, tan degrees)`` to try, out well past the tolerance and through 0 exactly.
+
+    The search has to reach past `max_tilt` by a long way, or a region sloping at forty
+    degrees would be read as sloping by however much the grid allowed and let through.
+    """
+    step = 2.0
+    steps = int(math.ceil(max(2.5 * max_tilt, 45.0) / step))
+    return tuple((angle, math.tan(math.radians(angle)))
+                 for angle in (i * step for i in range(-steps, steps + 1)))
+
+
+def baseline_tilt(mask: np.ndarray, det, level: Level) -> float | None:
+    """Degrees the ink inside *det* slopes by, or None when there is too little to say.
+
+    The ink is sheared by each candidate angle and projected onto the vertical, and the
+    angle whose profile is most concentrated wins - which is the angle the writing runs at,
+    because that is the one that drops every glyph of a line into the same few rows.
+
+    Shearing rather than fitting a line through the per-column centres, because a fitted
+    line is dragged by ascenders and descenders: level text reading "gap" slopes by four
+    degrees that way and "The" by twelve, which is most of the tolerance spent on nothing.
+    Shearing does not care where in its band a glyph sits, only that the band is narrow.
+
+    Projections are taken over the ink pixels rather than the crop, so the cost follows how
+    much writing is there rather than how big the box is.
+    """
+    height, width = mask.shape[:2]
+    x0, y0, x1, y1 = det.bbox
+    x0, y0 = max(0, x0), max(0, y0)
+    x1, y1 = min(width, x1), min(height, y1)
+    crop = mask[y0:y1, x0:x1]
+    if crop.size == 0:
+        return None
+    rows, cols = crop.shape[:2]
+    if rows < level.min_height or cols < level.min_aspect * rows:
+        return None
+
+    peak = int(crop.max())
+    if peak <= 0:
+        return None
+    # Thresholded against the region's own peak: a credit half way through a fade never
+    # reaches any fixed level, and a fixed one would leave exactly those frames unjudged.
+    ys, xs = np.nonzero(crop >= max(8, peak // 4))
+    if ys.size < level.min_ink:
+        return None
+    if ys.size > level.max_ink:
+        stride = ys.size // level.max_ink + 1
+        ys, xs = ys[::stride], xs[::stride]
+    weights = crop[ys, xs].astype(np.float32)
+    ys = ys.astype(np.float32)
+    # Sheared about the middle, so no candidate angle pushes the region far off its own rows.
+    xs = xs.astype(np.float32) - float(cols) / 2.0
+
+    best_angle, best_score, flat_score = 0.0, -1.0, 0.0
+    for angle, slope in _tilt_grid(level.max_tilt):
+        band = np.rint(ys - xs * slope).astype(np.int32)
+        band -= band.min()
+        profile = np.bincount(band, weights=weights)
+        # Every angle projects the same total, so the more of it lands in the same rows the
+        # larger the sum of squares. No normalisation needed - only the ranking is used.
+        score = float(np.dot(profile, profile))
+        if angle == 0.0:
+            flat_score = score
+        if score > best_score:
+            best_score, best_angle = score, angle
+    # A near-tie means the ink is a blob, not writing, and the winning angle means nothing.
+    # Reporting it as level leaves the verdict to the gates that can actually judge a blob.
+    if best_score <= flat_score * level.margin:
+        return 0.0
+    return best_angle
+
+
+def upright_detections(mask: np.ndarray, dets: Sequence, level: Level) -> tuple[list, int]:
+    """The detections whose ink runs along the screen, and how many did not.
+
+    A frame with even one measurably level region keeps its unmeasurable ones too - a
+    subtitle line arrives as several word boxes and the short ones are still part of it. But
+    a frame whose only readings are sloped has nothing overlaid on it, and the regions too
+    small to judge go with the rest rather than carrying the frame on their own.
+    """
+    kept, tilted, upright = [], 0, False
+    for det in dets:
+        tilt = baseline_tilt(mask, det, level)
+        if tilt is None:
+            kept.append(det)
+        elif abs(tilt) <= level.max_tilt:
+            kept.append(det)
+            upright = True
+        else:
+            tilted += 1
+    if tilted and not upright:
+        return [], tilted
+    return kept, tilted
+
+
 def scan_clip(clip: Clip, cfg: PipelineConfig, detectors: Sequence,
               thresholds: Thresholds, windows: int = 8, window_len: int = 45,
               exhaustive: bool = False, sweep: Sweep | None = None,
               reader: "WordReader | None" = None, reading: Reading | None = None,
+              level: Level | None = None,
               cancel: threading.Event | None = None,
               on_progress: Callable[[int, int, str], None] | None = None) -> ClipResult:
     """Decide whether one clip carries overlay text, cheapest question first.
@@ -745,6 +912,7 @@ def scan_clip(clip: Clip, cfg: PipelineConfig, detectors: Sequence,
     from dsf.pipeline import context_radius, iter_masks_detailed
 
     reading = reading or Reading()
+    level = level or Level()
     started = time.monotonic()
     result = ClipResult(clip=clip)
     try:
@@ -811,6 +979,9 @@ def scan_clip(clip: Clip, cfg: PipelineConfig, detectors: Sequence,
                     # half of what it counts for at full strength - which is the honest
                     # reading of how much of the depth map it has wrecked.
                     coverage = float(mask.sum()) / (255.0 * pixels)
+                    if level.require and dets:
+                        dets, sloped = upright_detections(mask, dets, level)
+                        result.tilted += sloped
                     done = verdict.observe(start + offset, coverage, len(dets))
                     if dets:
                         best.append((coverage, start + offset, list(dets)))
@@ -920,13 +1091,14 @@ class ScanOptions:
     #: None disables the cheap first pass and scans every clip with the full pipeline.
     sweep: Sweep | None = field(default_factory=Sweep)
     reading: Reading = field(default_factory=Reading)
+    level: Level = field(default_factory=Level)
     workers: int = DEFAULT_WORKERS
 
 
 REPORT_COLUMNS = ["clip", "verdict", "stage", "swept_frames", "sweep_hits",
                   "frames_scanned", "text_frames", "longest_run", "peak_coverage",
-                  "words", "first_hits", "elapsed_s", "rgb_action", "rgb_dest",
-                  "depth_source", "depth_status", "depth_action", "error"]
+                  "tilted_regions", "words", "first_hits", "elapsed_s", "rgb_action",
+                  "rgb_dest", "depth_source", "depth_status", "depth_action", "error"]
 
 
 def run_scan(options: ScanOptions, post: Callable[[tuple], None],
@@ -1010,6 +1182,12 @@ def run_scan(options: ScanOptions, post: Callable[[tuple], None],
     else:
         log("sweep off - every clip gets the full pipeline")
 
+    if options.level.require:
+        log(f"text must sit level: regions sloping by more than "
+            f"{options.level.max_tilt:g} degrees are discarded")
+    else:
+        log("level check off - sloping text counts the same as level text")
+
     # Loaded up front rather than on the first clip that needs it, so a missing recogniser
     # is reported in the first seconds of a scan instead of an hour into one.
     reader = None
@@ -1019,7 +1197,8 @@ def run_scan(options: ScanOptions, post: Callable[[tuple], None],
             reader = WordReader(cfg.detect.device, batch_size=32)
             log(f"recogniser ready on {reader.device}: text must read as a word of "
                 f"{options.reading.min_chars}+ characters at "
-                f"{options.reading.min_confidence:.2f} confidence")
+                f"{options.reading.min_confidence:.2f} confidence, and not as one "
+                f"character repeated")
         except Exception as exc:  # noqa: BLE001 - degrade rather than abort
             log(f"note: recogniser unavailable ({exc}); continuing without the word check, "
                 f"which means more false positives")
@@ -1062,8 +1241,8 @@ def run_scan(options: ScanOptions, post: Callable[[tuple], None],
         return scan_clip(clip, cfg, detectors, options.thresholds,
                          windows=options.windows, window_len=options.window_len,
                          exhaustive=options.exhaustive, sweep=options.sweep,
-                         reader=reader, reading=options.reading, cancel=cancel,
-                         on_progress=progress)
+                         reader=reader, reading=options.reading, level=options.level,
+                         cancel=cancel, on_progress=progress)
 
     totals = {"text": 0, "rejected": 0, "clean": 0, "error": 0, "skipped": 0, "cancelled": 0}
     started = time.monotonic()
@@ -1169,6 +1348,7 @@ def _write_row(writer, handle, result: ClipResult, rgb_action: str = "",
         "text_frames": result.text_frames,
         "longest_run": result.longest_run,
         "peak_coverage": f"{result.peak_coverage:.6e}",
+        "tilted_regions": result.tilted,
         "first_hits": " ".join(str(h) for h in result.hits),
         "elapsed_s": f"{result.elapsed:.2f}",
         "rgb_action": rgb_action,
@@ -1220,6 +1400,8 @@ class ScannerApp:
             "require_words": tk.BooleanVar(value=True),
             "min_chars": tk.StringVar(value="3"),
             "min_confidence": tk.StringVar(value="0.45"),
+            "require_level": tk.BooleanVar(value=True),
+            "max_tilt": tk.StringVar(value="8"),
             "windows": tk.StringVar(value="8"),
             "window_len": tk.StringVar(value="45"),
             "min_text_frames": tk.StringVar(value="6"),
@@ -1280,7 +1462,7 @@ class ScannerApp:
         ttk.Combobox(frame, values=("auto", "cuda", "cpu"), textvariable=self.vars["device"],
                      state="readonly", width=8).grid(row=0, column=3, sticky="w", pady=3)
         spin(0, 4, "Batch size", "batch_size", 1, 64)
-        spin(9, 2, "Clip workers", "workers", 1, 16)
+        spin(10, 2, "Clip workers", "workers", 1, 16)
 
         ttk.Checkbutton(frame, text="Scan subfolders", variable=self.vars["recursive"]
                         ).grid(row=1, column=0, columnspan=2, sticky="w", pady=3)
@@ -1315,18 +1497,25 @@ class ScannerApp:
         ttk.Entry(frame, textvariable=self.vars["min_confidence"], width=10
                   ).grid(row=5, column=5, sticky="w", pady=3)
 
-        ttk.Separator(frame, orient="horizontal").grid(row=6, column=0, columnspan=6,
-                                                       sticky="ew", pady=(8, 4))
-        spin(7, 0, "Confirm windows", "windows", 1, 64)
-        spin(7, 2, "Frames per window", "window_len", 5, 2000)
-        spin(7, 4, "Detect every Nth frame", "detect_every", 0, 30)
+        ttk.Checkbutton(frame, text="Require the text to sit level on screen",
+                        variable=self.vars["require_level"]
+                        ).grid(row=6, column=0, columnspan=2, sticky="w", pady=3)
+        ttk.Label(frame, text="Max tilt (deg)").grid(row=6, column=2, sticky="w", padx=(0, 6))
+        ttk.Entry(frame, textvariable=self.vars["max_tilt"], width=10
+                  ).grid(row=6, column=3, sticky="w", pady=3)
 
-        spin(8, 0, "Min text frames", "min_text_frames", 1, 500)
-        spin(8, 2, "Min consecutive", "min_run", 1, 200)
-        ttk.Label(frame, text="Min coverage").grid(row=8, column=4, sticky="w", padx=(0, 6))
+        ttk.Separator(frame, orient="horizontal").grid(row=7, column=0, columnspan=6,
+                                                       sticky="ew", pady=(8, 4))
+        spin(8, 0, "Confirm windows", "windows", 1, 64)
+        spin(8, 2, "Frames per window", "window_len", 5, 2000)
+        spin(8, 4, "Detect every Nth frame", "detect_every", 0, 30)
+
+        spin(9, 0, "Min text frames", "min_text_frames", 1, 500)
+        spin(9, 2, "Min consecutive", "min_run", 1, 200)
+        ttk.Label(frame, text="Min coverage").grid(row=9, column=4, sticky="w", padx=(0, 6))
         ttk.Entry(frame, textvariable=self.vars["min_coverage"], width=10
-                  ).grid(row=8, column=5, sticky="w", pady=3)
-        spin(9, 0, "Sweep hits to escalate", "sweep_hits", 1, 60)
+                  ).grid(row=9, column=5, sticky="w", pady=3)
+        spin(10, 0, "Sweep hits to escalate", "sweep_hits", 1, 60)
 
         ttk.Label(frame, foreground="#666", text=(
             "The sweep runs detection alone and skips a clip outright when it finds nothing "
@@ -1336,8 +1525,11 @@ class ScannerApp:
             "window grid can hold still and hold its colour, but it does not read as a word. "
             "Windows are consecutive runs of frames because the persistence gate - the thing "
             "that spares shop signs and licence plates - reads a detection's neighbours in "
-            "time. 'Detect every Nth' of 0 keeps the profile's own value."
-        ), wraplength=1000, justify="left").grid(row=10, column=0, columnspan=6, sticky="w",
+            "time. 'Detect every Nth' of 0 keeps the profile's own value. The level check "
+            "asks which way the ink runs and throws away anything sloping: subtitles and "
+            "credits are composited square to the frame, while the railings and window "
+            "frames that get this far are square to nothing."
+        ), wraplength=1000, justify="left").grid(row=11, column=0, columnspan=6, sticky="w",
                                                  pady=(6, 0))
 
     def _build_actions(self, root) -> None:
@@ -1452,6 +1644,7 @@ class ScannerApp:
                 "sweep_hits": int(self.vars["sweep_hits"].get()),
                 "min_chars": int(self.vars["min_chars"].get()),
                 "min_confidence": float(self.vars["min_confidence"].get()),
+                "max_tilt": float(self.vars["max_tilt"].get()),
                 "workers": int(self.vars["workers"].get()),
             }
         except ValueError as exc:
@@ -1488,6 +1681,8 @@ class ScannerApp:
             reading=Reading(require=self.vars["require_words"].get(),
                             min_chars=numbers["min_chars"],
                             min_confidence=numbers["min_confidence"]),
+            level=Level(require=self.vars["require_level"].get(),
+                        max_tilt=max(0.0, numbers["max_tilt"])),
             workers=numbers["workers"],
         )
 

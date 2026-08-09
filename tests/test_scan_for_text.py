@@ -432,6 +432,169 @@ def test_a_confident_word_is_still_needed_not_just_a_long_one():
     assert scan.legible([("asked", 0.20)], reading) == []
 
 
+def test_one_character_repeated_is_not_a_word():
+    """A fireplace grill photographs as "111" - long, confident, and meaningless."""
+    reading = scan.Reading(min_chars=3, min_confidence=0.45)
+    assert scan.legible([("111", 0.98)], reading) == []
+    assert scan.legible([("XXX", 0.97)], reading) == []
+    assert scan.legible([("0000", 0.91)], reading) == []
+    # Case is not what makes a repeat, and punctuation between the repeats is not either.
+    assert scan.legible([("iIiI", 0.99)], reading) == []
+    assert scan.legible([("1.1.1", 0.99)], reading) == []
+
+
+def test_the_repeat_rule_does_not_take_the_real_words_with_it():
+    reading = scan.Reading(min_chars=3, min_confidence=0.45)
+    assert scan.legible([("111", 0.99), ("HELLO", 0.88)], reading) == ["HELLO"]
+    # Repeated characters within a word are ordinary; it is a word of nothing else that is not.
+    assert scan.legible([("aaron", 0.9), ("111", 0.9), ("XIII", 0.9)], reading) == \
+        ["aaron", "XIII"]
+
+
+def test_a_repeat_short_enough_to_be_a_word_is_still_judged_on_length():
+    """The two rules are independent: neither is a way round the other."""
+    reading = scan.Reading(min_chars=1, min_confidence=0.45)
+    assert scan.legible([("11", 0.99)], reading) == []
+    assert scan.legible([("1", 0.99)], reading) == ["1"]
+
+
+# --------------------------------------------------------------------------- sitting level
+
+def ink(mask: np.ndarray):
+    """A detection around everything marked in *mask*, as the pipeline would hand one over."""
+    from dsf.detect.base import Detection, bbox_to_poly
+
+    ys, xs = np.nonzero(mask > 8)
+    return Detection(poly=bbox_to_poly(xs.min(), ys.min(), xs.max() + 1, ys.max() + 1))
+
+
+def written(text: str, angle: float = 0.0, font_size: int = 36) -> np.ndarray:
+    """The mask of a line of text, turned by *angle* degrees anticlockwise."""
+    from conftest import draw_subtitle_full
+
+    _, _, full = draw_subtitle_full(gradient_background(640, 360), text,
+                                    font_size=font_size, y_frac=0.5)
+    if angle:
+        h, w = full.shape
+        turn = cv2.getRotationMatrix2D((w / 2, h / 2), angle, 1.0)
+        full = cv2.warpAffine(full, turn, (w, h), flags=cv2.INTER_LINEAR)
+    return full
+
+
+def tilt_of(mask: np.ndarray, level: "scan.Level | None" = None):
+    return scan.baseline_tilt(mask, ink(mask), level or scan.Level())
+
+
+def test_level_writing_reads_as_level():
+    for angle in (0, -3, 3, 6):
+        mask = written("HELLO WORLD", angle)
+        assert abs(tilt_of(mask)) <= scan.Level().max_tilt, angle
+
+
+def test_writing_that_slopes_is_measured_and_thrown_out():
+    for angle in (-10, 10, -20, 20, -35, 35):
+        tilt = tilt_of(written("HELLO WORLD", angle))
+        assert abs(tilt) > scan.Level().max_tilt, f"{angle} read as {tilt}"
+        # Not just "sloped" - the angle itself comes back, which is what makes a rejection
+        # arguable when a clip turns out to have been flagged wrongly.
+        assert abs(abs(tilt) - abs(angle)) <= 4, f"{angle} read as {tilt}"
+
+
+def test_a_sloping_grill_is_sloped_and_a_level_one_is_not():
+    """The false positive this is for: structure that survives every gate upstream."""
+    sloping = np.zeros((360, 640), np.uint8)
+    level = np.zeros((360, 640), np.uint8)
+    for bar in range(6):
+        for x in range(200, 440):
+            sloping[150 + bar * 10 + int((x - 200) * 0.36), x] = 255
+        level[150 + bar * 10:153 + bar * 10, 200:440] = 255
+
+    assert abs(tilt_of(sloping)) > scan.Level().max_tilt
+    # A level grill is level, and is left to the gates that can tell a grill from writing.
+    assert tilt_of(level) == 0.0
+
+
+def test_ink_with_no_direction_is_called_level_rather_than_guessed_at():
+    """A blob's best angle wins by nothing, and a winner by nothing is not believed."""
+    blob = np.zeros((360, 640), np.uint8)
+    blob[160:200, 200:440] = 255
+    assert tilt_of(blob) == 0.0
+
+    speckle = np.zeros((360, 640), np.uint8)
+    speckle[150:210, 200:440] = (np.random.default_rng(0).random((60, 240)) > 0.6) * 255
+    assert tilt_of(speckle) == 0.0
+
+
+def test_a_region_too_small_or_too_narrow_to_have_a_baseline_is_not_judged():
+    lone_glyph = written("I", 0, font_size=40)
+    assert tilt_of(lone_glyph) is None
+
+    pole = np.zeros((360, 640), np.uint8)
+    pole[80:300, 300:312] = 255
+    assert tilt_of(pole) is None
+
+    speck = np.zeros((360, 640), np.uint8)
+    speck[100:104, 200:230] = 255
+    assert tilt_of(speck) is None
+
+
+def test_a_short_word_is_let_through_rather_than_guessed_at():
+    """Three glyphs climbing is not evidence of a slope, and must not cost a real subtitle."""
+    for word in ("The", "gap", "you", "why"):
+        assert abs(tilt_of(written(word))) <= scan.Level().max_tilt, word
+
+
+def test_italics_lean_without_sloping():
+    """The glyphs slant; the baseline does not, and it is the baseline being asked about."""
+    for word in ("HELLO WORLD", "you know", "The"):
+        for lean in (0.20, 0.36, -0.30):  # 0.36 is a steeper italic than any subtitle font
+            mask = written(word)
+            rows, cols = mask.shape
+            skew = np.float32([[1, lean, -lean * rows / 2], [0, 1, 0]])
+            mask = cv2.warpAffine(mask, skew, (cols, rows), flags=cv2.INTER_LINEAR)
+            assert abs(tilt_of(mask)) <= scan.Level().max_tilt, f"{word} at {lean}"
+
+
+def test_a_drop_shadow_is_not_a_slope():
+    text = written("HELLO WORLD")
+    shadowed = np.maximum(text, np.roll(np.roll(text, 3, axis=0), 3, axis=1) // 2)
+    assert tilt_of(shadowed) == 0.0
+
+
+def test_the_tolerance_is_what_decides_the_verdict():
+    lax = scan.Level(max_tilt=30.0)
+    strict = scan.Level(max_tilt=2.0)
+    mask = written("HELLO WORLD", 12)
+    assert abs(tilt_of(mask, lax)) <= lax.max_tilt
+    assert abs(tilt_of(mask, strict)) > strict.max_tilt
+
+
+def test_a_frame_keeps_its_level_regions_and_drops_the_sloping_ones():
+    level, sloped = written("HELLO WORLD"), np.roll(written("MOTEL SIGN", 22), -120, axis=0)
+    frame = np.maximum(level, sloped)
+    kept, tilted = scan.upright_detections(frame, [ink(level), ink(sloped)], scan.Level())
+    assert [d.bbox for d in kept] == [ink(level).bbox] and tilted == 1
+
+
+def test_a_frame_with_nothing_but_sloping_regions_has_no_text_on_it():
+    sloped = written("MOTEL SIGN", 22)
+    kept, tilted = scan.upright_detections(sloped, [ink(sloped)], scan.Level())
+    assert kept == [] and tilted == 1
+
+
+def test_regions_too_small_to_judge_do_not_carry_a_frame_on_their_own():
+    """Unjudgeable regions ride along with a level one, but cannot stand in for one."""
+    sloped, glyph = written("MOTEL SIGN", 22), np.roll(written("I", 0, 40), -120, axis=0)
+    frame = np.maximum(sloped, glyph)
+    dets = [ink(sloped), ink(glyph)]
+    assert scan.upright_detections(frame, dets, scan.Level())[0] == []
+
+    level = np.roll(written("HELLO WORLD"), -60, axis=0)
+    frame = np.maximum(frame, level)
+    kept, _ = scan.upright_detections(frame, dets + [ink(level)], scan.Level())
+    assert len(kept) == 2  # the lone glyph and the subtitle, not the sign
+
+
 # --------------------------------------------------------------------------- the verdict
 
 def feed(verdict, pattern, coverage=1e-3, detections=1):
@@ -618,6 +781,28 @@ def test_the_window_builds_and_the_queue_reaches_it(tmp_path, monkeypatch):
 
         app._save_settings()
         assert "profile" in (tmp_path / "settings.json").read_text(encoding="utf-8")
+    finally:
+        root.destroy()
+
+
+@pytest.mark.skipif(scan.tk is None, reason="this Python has no tkinter")
+def test_the_boxes_reach_the_options_the_scan_actually_runs_on(tmp_path, monkeypatch):
+    """Every widget is a knob on something, and a knob wired to nothing is worse than none."""
+    monkeypatch.setattr(scan, "SETTINGS_PATH", tmp_path / "settings.json")
+    try:
+        root = scan.tk.Tk()
+    except scan.tk.TclError as exc:
+        pytest.skip(f"no display available: {exc}")
+    try:
+        app = scan.ScannerApp(root)
+        app.vars["rgb"].set(str(tmp_path))
+        app.vars["out"].set(str(tmp_path / "out"))
+        app.vars["max_tilt"].set("12.5")
+        options = app._collect()
+        assert options.level == scan.Level(require=True, max_tilt=12.5)
+
+        app.vars["require_level"].set(False)
+        assert not app._collect().level.require
     finally:
         root.destroy()
 

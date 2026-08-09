@@ -152,7 +152,8 @@ before. That ordering is what makes a folder of 2500 clips finishable.
    the clip, at a reduced detector input size. No stroke extraction, no temporal filter, no
    prior. A clip with nothing text-shaped in it stops here, which is most of a folder.
 2. **Confirm** - the full pipeline, on windows centred where the sweep actually found
-   something. This is the stage that separates an overlay from a shop sign.
+   something. This is the stage that separates an overlay from a shop sign, and the stage
+   that throws away regions whose ink does not run level.
 3. **Read** - the strongest confirmed frame goes to a recogniser, and the clip is only
    flagged if something reads as an actual word.
 
@@ -161,6 +162,16 @@ its colour, sit where subtitles sit - and a railing, a window grid or a run of c
 noise can answer yes to all of it. Asking what it *says* is what separates writing from
 structure. The words are recorded in `scan_report.csv` either way, so a verdict you disagree
 with can be argued with rather than guessed at.
+
+Two rules catch what a recogniser answers when there is nothing to read. It still answers,
+and regular structure is what it answers with: the bars of a fireplace grill come back as
+`111`, a run of railings as `IIII`, each as long and as confident as a real word. **A word
+that is one character repeated is not a word**, so those are discarded. And **overlay text
+sits level**: subtitles and credits are composited square to the frame, while the straight
+edges that get this far - railings, window frames, roof lines, reflections - are square to
+nothing. The scan shears the ink in each region until its rows line up, and the angle that
+takes is the angle the writing runs at; more than 8 degrees of it and the region is dropped
+(`tilted_regions` in the report counts them).
 
 Several clips are scanned at once, sharing one set of models. Each worker spends most of its
 life waiting - on ffmpeg starting up, on decoding, on the disk - so a second and third fill
@@ -191,12 +202,22 @@ old scan read blindly.
   Korean, Cyrillic or Arabic - it would reject every clip otherwise. Clips that pass the
   overlay gates but fail to read are reported as `rejected` rather than silently dropped,
   so they are easy to review.
+- **Level text only**, by default. Turn *Require the text to sit level on screen* off for
+  footage whose overlays are deliberately angled, or raise *Max tilt (deg)* from 8 rather
+  than turning it off outright. Regions too small or too narrow to have a baseline - a lone
+  glyph, a single stroke - are passed through unjudged rather than guessed at, and so are
+  regions whose ink has no direction at all, like a solid block or a patch of noise.
 - **Dry run** decides and reports without copying; *Skip clips already in the output* makes
   an interrupted scan resumable; every decision and its evidence lands in `scan_report.csv`.
 
 If clips are still being copied that have no text in them, the report says which stage let
-each one through. Raise *Min word length* or *Min word conf.* to tighten the reader, and
-*Min text frames* / *Min coverage* to tighten the overlay gates.
+each one through. Raise *Min word length* or *Min word conf.* to tighten the reader, lower
+*Max tilt* to insist on straighter text, and raise *Min text frames* / *Min coverage* to
+tighten the overlay gates.
+
+If clips with real subtitles are being left behind, check `tilted_regions` in the report
+first: a large count on a clip you expected to be flagged means the level check is reading
+the text as sloped, and *Max tilt* wants raising.
 
 ## Commands
 
