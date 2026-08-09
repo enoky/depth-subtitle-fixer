@@ -81,19 +81,24 @@ def _median_u8(window: Sequence[np.ndarray]) -> np.ndarray:
     return ((items[middle - 1].astype(np.uint16) + items[middle]) // 2).astype(np.uint8)
 
 
-def smooth(center: np.ndarray, window: Sequence[np.ndarray], cfg: TemporalConfig) -> np.ndarray:
+def smooth(center, window: Sequence, cfg: TemporalConfig, ops=None):
     """Collapse a window of uint8 alpha masks into one.
 
     ``median`` rejects isolated false positives *and* fills isolated misses; ``max`` only
     fills misses, which is what scrolling credits want since a moving glyph must never be
     voted away by its neighbours. *center* is passed explicitly because windows are truncated
     at the clip boundaries, so the centre is not always at ``len(window) // 2``.
+
+    *ops* is an optional `dsf.accel` backend. Given one, the masks are whatever that backend
+    works in - GPU buffers, say - and the reduction happens there instead; the arithmetic is
+    the same either way, which is what `tests/test_accel.py` holds it to. Passed in rather
+    than imported so this module stays free of any accelerator.
     """
     if cfg.mode == "none" or len(window) <= 1:
         return center
     if cfg.mode == "median":
-        return _median_u8(window)
+        return ops.median(window) if ops is not None else _median_u8(window)
     if cfg.mode == "max":
         # reduce runs straight down the window; np.stack copied all of it first.
-        return np.maximum.reduce(window)
+        return ops.max_reduce(window) if ops is not None else np.maximum.reduce(window)
     raise ValueError(f"unknown temporal mode {cfg.mode!r}; use median, max or none")

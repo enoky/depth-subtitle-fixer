@@ -14,6 +14,7 @@ from typing import Callable, Iterator, Sequence
 import cv2
 import numpy as np
 
+from . import accel
 from .composite import composite_frame, resize_alpha
 from .config import PipelineConfig
 from .detect import build_detectors
@@ -21,11 +22,15 @@ from .detect.base import Detection, merge_detections
 from .filters import GeometryFilter, appearance_ok, persistence_ok, sliding_window
 from .media import is_sequence, open_depth_sink, probe, read_depth, read_rgb
 from .prefetch import depth_for, prefetch
-from .refine.strokes import AlphaPatch, compose_alpha, compose_levels, extract_patch
-from .temporal import from_u8, smooth, to_u8
+from .refine.strokes import AlphaPatch, extract_patch
+from .temporal import from_u8, smooth
 from .videoio import VideoInfo
 
 ProgressFn = Callable[[int], None]
+
+#: What `remembered` uses when nobody hands it a backend - which is what its own tests do,
+#: and what any caller outside this module gets.
+_CPU_OPS = accel.CpuOps()
 
 
 @dataclass
@@ -118,9 +123,7 @@ def _detect_chunks(frames, chunk_size: int, every: int, detectors, geometry,
                 progress(index)
 
 
-def remembered(stream: Iterator[tuple[np.ndarray, np.ndarray, list[Detection]]],
-               cfg: PipelineConfig
-               ) -> Iterator[tuple[np.ndarray, np.ndarray, list[Detection]]]:
+def remembered(stream: Iterator[tuple], cfg: PipelineConfig, ops=None) -> Iterator[tuple]:
     """Drop marks that never show up as real text anywhere nearby in time.
 
     Part-way through a fade the mask is normalised by whatever the text is showing at, so a
@@ -137,12 +140,20 @@ def remembered(stream: Iterator[tuple[np.ndarray, np.ndarray, list[Detection]]],
     wrong place and erase the text. Hence the overlap check: the memory only filters a frame
     when it already explains most of what that frame found, so text that has moved is left
     alone rather than deleted.
+
+    *ops* is a `dsf.accel` backend; without one this runs on numpy exactly as it always did.
+    The full-frame half of the stage - the thresholds, the twenty-one-frame or, the dilate -
+    goes wherever that backend lives. The label bookkeeping does not: connected components
+    with statistics, a bincount and a lookup have no CUDA equivalent worth having, and the
+    two byte-per-pixel frames they need cost 0.27 ms each to fetch, so they are answered on
+    the CPU in both backends and there is only ever one version of that arithmetic.
     """
     radius = max(0, cfg.temporal.prior_window // 2)
     if radius == 0:
         yield from stream
         return
 
+    ops = ops or _CPU_OPS
     confident_level = cfg.temporal.prior_min_level * 255.0
     slack = cv2.getStructuringElement(
         cv2.MORPH_ELLIPSE,
@@ -151,11 +162,11 @@ def remembered(stream: Iterator[tuple[np.ndarray, np.ndarray, list[Detection]]],
     # How opaque a frame's text got is asked of every frame in every window it appears in -
     # once per frame here instead, because a full-frame max over a twenty-one frame window
     # cost more than the rest of the stage put together.
-    tagged = ((shape, level, dets, float(level.max())) for shape, level, dets in stream)
+    tagged = ((shape, level, dets, ops.peak(level)) for shape, level, dets in stream)
 
     for (shape_u8, level_u8, dets, _), window in sliding_window(tagged, radius):
-        found = (shape_u8 > 127).astype(np.uint8)
-        if not found.any():
+        found = ops.over_127(shape_u8)
+        if not ops.any(found):
             yield shape_u8, level_u8, dets
             continue
 
@@ -163,18 +174,16 @@ def remembered(stream: Iterator[tuple[np.ndarray, np.ndarray, list[Detection]]],
         for other_shape, _, _, peak in window:
             if peak < confident_level:
                 continue
-            if trusted is None:
-                trusted = other_shape > 127
-            else:
-                # Accumulated in place: `trusted | witness` built a new full-frame array
-                # for every member of the window.
-                trusted |= other_shape > 127
-        if trusted is None or not trusted.any():
+            # Accumulated in place: `trusted | witness` built a new full-frame array for
+            # every member of the window.
+            trusted = ops.or_into(trusted, ops.over_127(other_shape))
+        if trusted is None or not ops.any(trusted):
             # Nothing nearby is unambiguous - no grounds to overrule this frame.
             yield shape_u8, level_u8, dets
             continue
 
-        allowed = cv2.dilate(trusted.astype(np.uint8), slack).astype(bool)
+        found = ops.download(found)
+        allowed = ops.download(ops.dilate(trusted, slack)).astype(bool)
 
         # Judged per blob, and each blob is kept or dropped whole. A speck the fade
         # amplified has no counterpart in the remembered shape at all, while a glyph that
@@ -207,15 +216,15 @@ def remembered(stream: Iterator[tuple[np.ndarray, np.ndarray, list[Detection]]],
             continue
 
         # Painted through a lookup indexed by label, so the frame is written once rather
-        # than once per blob kept.
+        # than once per blob kept. Written as 0/255 rather than 0/1 so that selecting with it
+        # is a bitwise and once it is back on the backend - the same choice `over_127` makes.
         verdict = np.zeros(count, np.uint8)
-        verdict[1:] = overlaps >= cfg.temporal.prior_min_support
+        verdict[1:] = np.where(overlaps >= cfg.temporal.prior_min_support, 255, 0)
         if verdict[1:].all():
             yield shape_u8, level_u8, dets
             continue
-        keep = verdict[labels]
-        yield np.where(cv2.dilate(keep, slack).astype(bool), shape_u8, np.uint8(0)), \
-            level_u8, dets
+        keep = ops.dilate(ops.upload(verdict[labels]), slack)
+        yield ops.select(shape_u8, keep), level_u8, dets
 
 
 def iter_masks_detailed(rgb_path: str, cfg: PipelineConfig, info: VideoInfo | None = None,
@@ -223,12 +232,29 @@ def iter_masks_detailed(rgb_path: str, cfg: PipelineConfig, info: VideoInfo | No
                         progress: ProgressFn | None = None,
                         detectors: Sequence | None = None
                         ) -> Iterator[tuple[np.ndarray, list[Detection]]]:
-    """Yield ``(mask, accepted detections)`` per frame, fully gated and smoothed."""
+    """Yield ``(mask, accepted detections)`` per frame, fully gated and smoothed.
+
+    The masks come back as ndarrays whichever backend produced them, so every caller of this
+    is unaffected by there being a GPU. Inside, the chain stays on that backend end to end -
+    a frame that went up as patches comes down once, as the finished mask.
+    """
     info = info or probe(rgb_path)
     items = iter_frame_items(rgb_path, cfg, info, start=start, max_frames=max_frames,
                              seek_frame=seek_frame, progress=progress, detectors=detectors)
 
-    def gated() -> Iterator[tuple[np.ndarray, float, list[Detection]]]:
+    # Ring depths, in frames, for the buffers the backend hands out. A buffer must outlive
+    # every window that can still be holding it, so each of these is the window that holds
+    # that particular result, plus slack. Sized here rather than in `dsf.accel` because these
+    # are this pipeline's windows, not a property of the hardware.
+    ops = accel.ops(cfg.detect.device, rings={
+        # The stroke shape is let go as soon as the temporal filter has consumed it.
+        "shape": cfg.temporal.window + 4,
+        # The level map and the smoothed shape both ride the prior's window to the end.
+        "level": cfg.temporal.prior_window + 4,
+        "median": cfg.temporal.prior_window + 4,
+    })
+
+    def gated() -> Iterator[tuple]:
         radius = max(0, cfg.filters.persist_window // 2)
         for item, window in sliding_window(items, radius):
             window_dets = [w.detections for w in window]
@@ -236,25 +262,25 @@ def iter_masks_detailed(rgb_path: str, cfg: PipelineConfig, info: VideoInfo | No
                     if persistence_ok(p.det, window_dets, cfg.filters)]
             # The stroke shape and the strength it is showing at travel separately, and the
             # strength stays per-region rather than becoming one number for the frame.
-            shape = compose_alpha(kept, info.height, info.width, normalised=True)
-            levels = compose_levels(kept, info.height, info.width)
-            yield to_u8(shape), to_u8(levels), [p.det for p in kept]
+            shape = ops.compose(kept, info.height, info.width, normalised=True)
+            levels = ops.compose_levels(kept, info.height, info.width)
+            yield ops.to_u8(shape, "shape"), ops.to_u8(levels, "level"), [p.det for p in kept]
 
-    def smoothed() -> Iterator[tuple[np.ndarray, np.ndarray, list[Detection]]]:
+    def smoothed() -> Iterator[tuple]:
         # Temporal filtering settles *where* the text is, never how strongly it shows.
         # Applied to the finished mask it would drag a fading credit up to its neighbours'
         # strength - so the last frame of a fade-out, with nothing detected on it at all,
         # would still get a near-solid mask stamped into depth that was never corrupted.
         radius = max(0, cfg.temporal.window // 2)
         for (shape_u8, level_u8, dets), window in sliding_window(gated(), radius):
-            yield (smooth(shape_u8, [s for s, _, _ in window], cfg.temporal),
+            yield (smooth(shape_u8, [s for s, _, _ in window], cfg.temporal, ops=ops),
                    level_u8, dets)
 
     grow = np.ones((5, 5), np.uint8)
-    for shape_u8, level_u8, dets in remembered(smoothed(), cfg):
+    for shape_u8, level_u8, dets in remembered(smoothed(), cfg, ops):
         # Levels grown a little so pixels the smoothing filled back in are covered by the
         # level of the text they belong to rather than falling off its edge.
-        yield to_u8(from_u8(shape_u8) * from_u8(cv2.dilate(level_u8, grow))), dets
+        yield ops.download(ops.scale_by(shape_u8, ops.dilate(level_u8, grow))), dets
 
 
 def iter_masks(rgb_path: str, cfg: PipelineConfig, info: VideoInfo | None = None,

@@ -19,13 +19,28 @@ class Detection:
     poly: np.ndarray  # (N, 2) float32
     score: float = 1.0
     source: str = ""
+    #: Cached `bbox`. Not an argument and not part of equality - it is derived from `poly`.
+    _bbox: tuple[int, int, int, int] | None = field(default=None, init=False, repr=False,
+                                                    compare=False)
 
     @property
     def bbox(self) -> tuple[int, int, int, int]:
-        """Axis-aligned integer (x0, y0, x1, y1), x1/y1 exclusive."""
-        x0, y0 = np.floor(self.poly.min(axis=0)).astype(int)
-        x1, y1 = np.ceil(self.poly.max(axis=0)).astype(int)
-        return int(x0), int(y0), int(x1), int(y1)
+        """Axis-aligned integer (x0, y0, x1, y1), x1/y1 exclusive.
+
+        Computed once and kept. The persistence gate asks every detection in a frame about
+        every detection in the window either side of it, so on a credit roll this was called
+        784 times per frame for the couple of dozen distinct answers it has - four numpy
+        reductions and two array allocations each, and 7% of a scanned frame once the mask
+        chain had moved to the GPU and stopped hiding it.
+
+        Safe to cache because `poly` is never written after construction: `clipped` builds a
+        new Detection rather than editing this one, and nothing else touches it.
+        """
+        if self._bbox is None:
+            x0, y0 = np.floor(self.poly.min(axis=0)).astype(int)
+            x1, y1 = np.ceil(self.poly.max(axis=0)).astype(int)
+            self._bbox = (int(x0), int(y0), int(x1), int(y1))
+        return self._bbox
 
     @property
     def width(self) -> int:
