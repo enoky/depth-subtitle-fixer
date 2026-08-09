@@ -29,6 +29,18 @@ def configure_model_cache(models_dir: Path | None = None) -> Path:
     os.environ.setdefault("DOCTR_CACHE_DIR", str(root / "doctr"))
     os.environ.setdefault("EASYOCR_MODULE_PATH", str(root / "easyocr"))
     os.environ.setdefault("HF_HOME", str(root / "hf"))
+    # doctr's preprocessor builds a throwaway ThreadPool of min(16, cpu_count()) workers on
+    # every call - twice, once to resize the batch and once to normalise it. Each of those
+    # short-lived threads becomes an OpenMP master the first time it touches an ATen op, and
+    # the team OpenMP spawns for it is never reclaimed when the thread dies. Measured on a
+    # 32-core box that is +120 OS threads per detected batch, none of them Python's: a scan
+    # of 130 clips reached ~60 GB and tens of thousands of threads, all of it stack commit
+    # that nothing in the process can see or free.
+    # Turning the pool off is not a trade - torch already parallelises the resize and the
+    # normalise internally, so this is 26% *faster* per batch (218ms -> 162ms on six 1080p
+    # frames) as well as flat. Read on every call rather than at import, so this holds
+    # wherever it is set from.
+    os.environ.setdefault("DOCTR_MULTIPROCESSING_DISABLE", "TRUE")
     # doctr imports defusedxml, which deprecation-warns on import. Nothing here can act on
     # it, and it would otherwise print on every single run.
     warnings.filterwarnings("ignore", message=r".*defusedxml\.cElementTree.*")

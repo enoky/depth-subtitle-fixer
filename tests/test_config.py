@@ -2,10 +2,12 @@
 
 from __future__ import annotations
 
+import os
+
 import pytest
 
 from dsf.cli import build_parser, parse_frame_list
-from dsf.config import PipelineConfig, apply_profile
+from dsf.config import PipelineConfig, apply_profile, configure_model_cache
 
 
 def cfg_from(argv):
@@ -104,3 +106,18 @@ def test_config_serialises_for_the_mask_sidecar():
     data = PipelineConfig().to_dict()
     assert data["composite"]["brightness"] == pytest.approx(0.92)
     assert "detectors" in data["detect"]
+
+
+def test_model_cache_disables_doctrs_per_call_thread_pool(tmp_path, monkeypatch):
+    """The scan leaks OS threads without this - see configure_model_cache for the mechanism."""
+    from doctr.file_utils import ENV_VARS_TRUE_VALUES
+
+    monkeypatch.delenv("DOCTR_MULTIPROCESSING_DISABLE", raising=False)
+    configure_model_cache(tmp_path)
+    assert os.environ["DOCTR_MULTIPROCESSING_DISABLE"].upper() in ENV_VARS_TRUE_VALUES
+
+
+def test_model_cache_leaves_an_explicit_choice_alone(tmp_path, monkeypatch):
+    monkeypatch.setenv("DOCTR_MULTIPROCESSING_DISABLE", "FALSE")
+    configure_model_cache(tmp_path)
+    assert os.environ["DOCTR_MULTIPROCESSING_DISABLE"] == "FALSE"
