@@ -24,10 +24,18 @@ Write-Host "==> Installing depth-subtitle-fixer + deps" -ForegroundColor Cyan
 & $py -m pip install -e ".[ui,dev]"
 
 # python-doctr depends on opencv-python, easyocr on opencv-python-headless. Both unpack into
-# the same cv2/ directory, so whichever installs last wins. Force headless -- we never call
-# cv2.imshow, and the headless build avoids Qt/GUI conflicts.
-Write-Host "==> Pinning opencv to the headless build" -ForegroundColor Cyan
-& $py -m pip install --force-reinstall --no-deps opencv-python-headless
+# the same cv2/ directory, so whichever installs last wins -- and neither is built with CUDA,
+# which leaves `dsf.accel` running the mask chain on the CPU at roughly half the speed. So the
+# last word goes to a CUDA-enabled build instead. This must stay the final step: anything
+# installed after it can overwrite cv2/ again.
+Write-Host "==> Installing the CUDA-enabled OpenCV" -ForegroundColor Cyan
+& (Join-Path $PSScriptRoot "install_opencv_cuda.ps1")
+if ($LASTEXITCODE -ne 0) {
+    # A missing CUDA toolkit or a failed download must not fail the whole setup: everything
+    # works without it, only slower. Say so and carry on.
+    Write-Host "==> CUDA OpenCV unavailable; falling back to the headless CPU build" -ForegroundColor Yellow
+    & $py -m pip install --force-reinstall --no-deps opencv-python-headless
+}
 
 Write-Host "==> Verifying" -ForegroundColor Cyan
 & $py -c "import torch; print('torch', torch.__version__, '| cuda', torch.cuda.is_available(), '|', torch.cuda.get_device_name(0) if torch.cuda.is_available() else 'NO GPU')"

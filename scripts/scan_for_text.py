@@ -988,6 +988,20 @@ def run_scan(options: ScanOptions, post: Callable[[tuple], None],
                        f"(scripts/setup.ps1)."))
         return
     log("detector ready")
+
+    # Which backend the mask chain will run on. Worth a line of its own: a CPU-only OpenCV
+    # halves the scan rate and is otherwise completely silent about it, and the usual cause -
+    # a `pip install` having overwritten the CUDA build - leaves no other trace.
+    from dsf import accel
+
+    if accel.resolve(cfg.detect.device) == "cuda":
+        log("mask chain on the GPU (CUDA OpenCV)")
+    elif accel.cuda_available():
+        log("mask chain on the CPU, as asked")
+    else:
+        log("mask chain on the CPU - this OpenCV has no CUDA support, which costs roughly "
+            "half the scan rate; scripts/install_opencv_cuda.ps1 installs a build that does")
+
     if options.sweep is not None:
         log(f"sweep: {options.sweep.clusters} clusters x {options.sweep.frames} frames at "
             f"{options.sweep.input_size or 1024}px, escalating on "

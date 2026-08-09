@@ -29,6 +29,31 @@ On Linux/macOS use `scripts/setup.sh`.
 
 Model weights (~180 MB, docTR + CRAFT) download on first run into `./models/`.
 
+### The CUDA OpenCV build
+
+`setup.ps1` finishes by installing a CUDA-enabled OpenCV in place of the stock wheel, because
+the mask chain runs on it - see [Where the time goes](#where-the-time-goes). You can install or
+repair it on its own:
+
+```powershell
+.\scripts\install_opencv_cuda.ps1
+```
+
+It needs the **CUDA 13.x toolkit** (the wheel links against the CUDA runtime rather than
+bundling it) and finds cuDNN inside the venv's own `torch/lib`, so there is no separate cuDNN
+download. Without a toolkit the script says so and changes nothing; everything still works on
+the CPU, just slower.
+
+Two things worth knowing:
+
+- `pip check` will report that `python-doctr` and `easyocr` want `opencv-python`. Expected and
+  harmless - they want *an* OpenCV, and this is one.
+- **Any later `pip install` can silently replace it.** Both of those packages depend on a stock
+  OpenCV, and all the OpenCV distributions unpack into the same `cv2/` directory, so whichever
+  lands last wins. Re-run the script afterwards. The scanner logs which backend it is using on
+  every run, and `dsf` warns once when torch can see a GPU and OpenCV cannot, so this failure
+  announces itself rather than just costing you half your speed in silence.
+
 ## Try it without your own footage
 
 ```bash
@@ -267,11 +292,59 @@ a 1080p clip the GPU was below 20% utilisation for 65% of the wall clock. The re
 depth is sized against the frame size rather than fixed, so the streaming promise holds at
 8K as well as at 720p.
 
+## Where the time goes
+
+Detection ran on the GPU from the start. The mask chain behind it - composing glyph patches
+into a full-frame alpha, the byte conversions, the temporal median, and the prior's
+threshold-and-or over its twenty-one frame window - did not, and on a 1080p frame it was 33 of
+the 99 ms a frame cost while the card sat idle. `src/dsf/accel.py` moves that chain onto the
+GPU through OpenCV's CUDA module, keeping it resident there from the patches going up to the
+finished mask coming down, so a frame crosses the bus once instead of at every step.
+
+Buffers are pooled, and that is most of why it is faster: a `cv2.cuda.min` that allocates its
+own destination costs 0.335 ms at 1080p against 0.0068 ms into a preallocated one. The kernels
+were never the expense, `cudaMalloc` was.
+
+Measured on a 1920x1080 clip, an RTX 5080, `--profile both`:
+
+| | CPU | CUDA |
+|---|---|---|
+| prior threshold+or, 21-frame window | 42.5 ms | 0.33 ms |
+| `scale_by` (shape x level) | 10.3 ms | 0.017 ms |
+| `to_u8` | 4.03 ms | 0.034 ms |
+| temporal median of 3 | 0.98 ms | 0.13 ms |
+| **whole mask chain, per frame** | **126 ms** | **60 ms** |
+
+`scripts/bench_scan.py` reproduces that table on your own footage, and `DSF_ACCEL=cpu` forces
+the numpy path so the two can be compared directly.
+
+**Where it does not help.** A folder triage scan barely moves - about 1.03x on the same
+footage. The sweep that decides whether a clip is worth a closer look is detection and nothing
+else, it never builds a mask, and a clip that flags stops the moment it has enough evidence -
+so the mask chain runs on a dozen frames per clip while the detector runs on sixty. The gain
+lands on work that masks every frame: `dsf fix` on the demo pair goes 15.5s to 12.4s, held
+back from the full 2x by the heal-and-composite step and the x265 encode, which are still CPU.
+
+What is left in a GPU frame is mostly not ours: docTR's detection and its post-processing are
+57% of it, and the ffmpeg decode another 13%.
+
+Two things were measured and deliberately **not** done:
+
+- **Stroke extraction stays on the CPU.** It works on crops a few hundred pixels across, where
+  kernel-launch overhead swamps the work: a 3x3 erode on a 70x900 crop is 0.006 ms on the CPU
+  and 0.064 ms on the GPU. `medianBlur` is a wash at typical crop sizes, and `distanceTransform`
+  has no CUDA implementation at all.
+- **NVDEC decoding was tried and rejected.** `cv2.cudacodec` decodes 1080p H.264 at 14.8 ms a
+  frame against the ffmpeg pipe's 8.7, opening a reader costs 328 ms against ffmpeg's 97, and on
+  the sweep's own pattern - eight short scattered windows - it was 2.8x slower. It also cannot
+  decode 4:4:4 at all, which is what `make_demo_clip.py` writes, and its YUV-to-RGB conversion
+  disagrees with swscale on 0.48% of pixels, which would feed the detector.
+
 ## Notes
 
 - `python-doctr` depends on `opencv-python` and `easyocr` on `opencv-python-headless`; they
-  share one `cv2/` install path. `setup.ps1` force-installs the headless build last. If you
-  later run a plain `pip install`, re-run that line.
+  share one `cv2/` install path with the CUDA build, so whichever installs last wins.
+  `setup.ps1` puts the CUDA one last - see [The CUDA OpenCV build](#the-cuda-opencv-build).
 - Depth maps at a different resolution than the source clip are handled - masks are resampled
   with `INTER_AREA` so stroke anti-aliasing survives.
 
