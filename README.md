@@ -310,6 +310,21 @@ tall a region had to be on that clip to be looked at at all.
    snapping. Below roughly 25% opacity a faded credit is quieter than the scene's own detail
    at stroke scale, and no single-frame method can recover it; `--temporal max` borrows from
    neighbouring frames there.
+   **Which side is the writing.** Both signs of the residual almost always respond: text is
+   thin, but so is every gap between its strokes, and outlined text answers one sign with its
+   fill and the other with its rim. So the decision asks, strongest question first, whether
+   the other sign responded at all; then which sign is *contained* by the other, since
+   writing is figure and everything else - a drawn outline, or just the picture behind it -
+   is ground; and only then which sign is the flatter colour, each measured against its own
+   response so that two signs answering at different strengths are asked the same question.
+
+   Getting the order right is the whole game. The first question used to be a ratio, "did
+   this sign respond 1.6x harder", which is a far weaker thing than it sounds and was asked
+   *first*: white-on-black-outline, the commonest subtitle style there is, lands at about
+   0.62 against a 0.625 cut-off, so which way a line went depended on how tightly the
+   detector had cropped it, and the mask was stamped onto the ring around the letters instead
+   of the letters. Containment separated those two readings 1.00 to 0.18 at every crop.
+
    **Two things in one box.** The residual is measured on luma, so anything inside the
    detection box as bright as the glyphs answers it exactly as a glyph does - right area,
    right thickness, right strength - and gets masked with them. A background object the

@@ -180,6 +180,66 @@ def test_stroke_cap_scales_with_text_size():
     assert large > cfg.max_stroke * 4, "4K credits need a far wider cap"
 
 
+def test_bold_unoutlined_credit_still_reads_as_light():
+    """The trap both earlier attempts at the outlined-text bug fell into.
+
+    Text drawn straight onto the picture answers one sign with its strokes and the other
+    with the gaps between them, and the gaps are thin too - so any fix that leans harder on
+    shape or containment starts reading the gaps as the writing and the credit comes back
+    as a hollow negative of itself. Containment is genuinely silent here, and has to be:
+    plain background is an open region that encloses nothing.
+    """
+    bg = gradient_background(900, 300)
+    frame, fill, _ = draw_subtitle_full(bg, "HELLO WORLD", font_size=52, stroke=0,
+                                        outline=(255, 255, 255))
+    x0, y0, x1, y1 = text_bbox(fill)
+    for margin in (6, 12, 20, 30):
+        patch = _extract(frame, (x0 - margin, y0 - margin, x1 + margin, y1 + margin))
+        assert patch is not None, f"nothing found at margin {margin}"
+        alpha = compose_alpha([patch], 300, 900)
+        gaps = (alpha > 0.5) & (fill == 0)
+        assert float((alpha[fill > 200] > 0.5).mean()) > 0.85, \
+            f"margin {margin}: the strokes themselves were not masked"
+        assert int(gaps.sum()) < int((fill > 200).sum()), \
+            f"margin {margin}: the mask followed the gaps between the strokes"
+
+
+@pytest.mark.parametrize("seed,background,texture", [(3, 120, 80), (12, 120, 80), (13, 140, 70)])
+def test_a_coloured_credit_over_a_busy_shot_is_not_read_inside_out(seed, background, texture):
+    """Amber text on a mid-grey shot: the flatness test used to pick the gaps between strokes.
+
+    Both signs respond here, and neither encloses the other - plain background is an open
+    region - so the decision falls to which sign is the flatter colour. That was compared in
+    raw luma, but the two signs answer at quite different strengths, and the same 0.05 spread
+    means one thing on a stroke standing well clear of its background and something else on a
+    sliver worth 0.05 in total. Measuring each sign's flatness against its own response
+    instead was right 74 times out of 84 on a real graded credit, against 62 before.
+
+    Judged on the stroke *shape* rather than the opacity it is stamped at: this credit is not
+    white, and the opacity model measures light text against white, so a saturated colour
+    comes back at a fraction of full strength however solid it really is. That is a known
+    limitation of the model, and a separate question from whether the polarity decision
+    picked out the writing or the holes in it.
+    """
+    rng = np.random.default_rng(seed)
+    h, w = 300, 900
+    noise = cv2.resize(rng.normal(0, 1, (h // 14, w // 14)).astype(np.float32), (w, h),
+                       interpolation=cv2.INTER_CUBIC)
+    noise = (noise - noise.min()) / (np.ptp(noise) + 1e-6)
+    base = np.clip(np.stack([noise * texture + background] * 3, -1), 0, 255).astype(np.uint8)
+    frame, fill, _ = draw_subtitle_full(base, "GRADED CREDIT", font_size=52, stroke=0,
+                                        fill=(255, 190, 80), outline=(255, 190, 80))
+    x0, y0, x1, y1 = text_bbox(fill)
+    patch = _extract(frame, (x0 - 8, y0 - 8, x1 + 8, y1 + 8))
+    assert patch is not None
+
+    shape = compose_alpha([patch], h, w, normalised=True)
+    on_text = float((shape[fill > 200] > 0.5).mean())
+    off_text = int(((shape > 0.5) & (fill == 0)).sum())
+    assert on_text > 0.80, f"the credit came back inverted ({on_text:.0%} on the glyphs)"
+    assert off_text < int((fill > 200).sum()), "the mask followed the gaps, not the strokes"
+
+
 def test_compose_alpha_merges_patches_with_max():
     from dsf.refine.strokes import AlphaPatch
 
@@ -483,13 +543,6 @@ def test_a_background_window_larger_than_the_crop_does_not_blow_up():
             assert out.shape == lum.shape
 
 
-@pytest.mark.xfail(reason="known open bug: the polarity decision is decided by a magnitude "
-                          "shortcut whose threshold (ratio 0.625) sits on top of the value "
-                          "outlined text produces (0.622), so which side it lands on turns "
-                          "on how tightly the line was cropped. Two reorderings were tried "
-                          "and both traded this for dropping bold unoutlined credits - see "
-                          "the commit that added this test.",
-                   strict=True)
 def test_outlined_text_resolves_to_its_fill_however_the_box_is_cropped():
     """White-on-black-outline is the commonest subtitle style, and it used to invert.
 
@@ -498,6 +551,13 @@ def test_outlined_text_resolves_to_its_fill_however_the_box_is_cropped():
     side of that it landed on depended on how tightly the detector had cropped the line, so
     the same subtitle came back as its letters at one box size and as the hollow ring around
     them at the next, and the depth plane was stamped onto the ring.
+
+    Fixed by making the magnitude question mean what it always claimed to: "did the other
+    sign respond at all", rather than "did it respond 1.6x less". It was being asked first,
+    so it was overruling a containment test that scored this 1.00 to 0.18 at every margin
+    here. Two earlier attempts reordered the questions instead and traded this for dropping
+    bold unoutlined credits - `test_bold_unoutlined_credit_still_reads_as_light` is those
+    attempts' failure, kept as a test so a third one cannot repeat it.
     """
     bg = gradient_background(640, 360)
     frame, fill, full = draw_subtitle_full(bg, "HELLO WORLD", font_size=36)

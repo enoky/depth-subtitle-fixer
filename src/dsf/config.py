@@ -114,8 +114,6 @@ class StrokeConfig:
     #: as a whole so its glyphs all measure ~1.0; scene detail amplified by a faint fade
     #: measures around half that.
     min_relative_strength: float = 0.75
-    #: how much stronger one sign must be before magnitude alone decides polarity
-    polarity_ratio: float = 1.6
     #: how far an outline pixel's luma may drift from the outline's own colour. Only the
     #: rim is colour-tested; the fill is found by opacity, which survives fades.
     luma_tol: float = 0.20

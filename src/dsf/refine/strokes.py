@@ -237,11 +237,21 @@ def _decide_polarity(lum: np.ndarray, white: np.ndarray, black: np.ndarray,
     3. If containment is a wash, fall back to colour flatness: the strokes are one flat
        colour while the gaps between them inherit whatever the shot is doing.
 
+    Question 1 asks whether the other sign responded, and nothing more. It used to ask
+    whether this one responded 1.6 times harder, which is a different and much weaker
+    question - and it was decided *first*, so it overruled a containment test that was
+    answering correctly and decisively. White-on-black-outline, the commonest subtitle style
+    there is, produces a ratio of about 0.62 against that 0.625 cut-off: which side of it a
+    given line landed on turned on how tightly the detector had cropped the box, so the same
+    subtitle came back as its letters at one margin and as the hollow ring around them at the
+    next. Containment separated those two readings 1.00 to 0.18 every single time.
     """
-    ratio = w_peak / max(b_peak, 1e-6)
-    if ratio > cfg.polarity_ratio:
+    # Not a ratio: `analyse_crop` has already established that at least one sign clears
+    # `min_response`, so this is "the other one is nothing but noise", and on noise the two
+    # questions below have nothing to work with.
+    if b_peak < cfg.min_response:
         return "light"
-    if ratio < 1.0 / cfg.polarity_ratio:
+    if w_peak < cfg.min_response:
         return "dark"
 
     w_core, b_core = _core(white), _core(black)
@@ -255,8 +265,15 @@ def _decide_polarity(lum: np.ndarray, white: np.ndarray, black: np.ndarray,
             abs(light_score - dark_score) > cfg.enclosure_margin:
         return "light" if light_score > dark_score else "dark"
 
-    w_spread = _colour_spread(lum, white, w_core)
-    b_spread = _colour_spread(lum, black, b_core)
+    # Each sign's flatness measured against its own response, not in raw luma. The two signs
+    # routinely answer at quite different strengths, and a 0.05 luma spread means one thing
+    # on a stroke standing 0.7 clear of its background and something else entirely on a
+    # sliver worth 0.05 in total - so comparing the raw numbers asks a different question of
+    # each side. On an amber credit whose letters carry a vertical gradient, the raw form
+    # read the writing as *less* flat than the fragments between it and inverted: over 84
+    # boxes of that credit it was right 62 times against 74 for this.
+    w_spread = _colour_spread(lum, white, w_core) / max(w_peak, cfg.min_response)
+    b_spread = _colour_spread(lum, black, b_core) / max(b_peak, cfg.min_response)
     return "light" if w_spread <= b_spread else "dark"
 
 
