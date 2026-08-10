@@ -247,7 +247,8 @@ tall a region had to be on that clip to be looked at at all.
 **Profiles** set sensible defaults; any explicit flag overrides them.
 
 - `--profile subtitles` (default) - static text in the lower band
-- `--profile credits` - full frame, tracks vertical scrolling
+- `--profile credits` - full frame, tracks vertical scrolling, and places the text just in
+  front of the depth around it rather than on a constant plane (see `--brightness-mode`)
 - `--profile both`
 
 **Finding the text**
@@ -277,7 +278,12 @@ tall a region had to be on that clip to be looked at at all.
 - `--brightness 0..1` - grey level for the painted text, mapped into the depth map's legal
   code range (10-bit limited = 64..940, so `0.92` ≈ code 870)
 - `--brightness-mode absolute|relative` - a constant plane, or a fixed offset in front of
-  the local depth
+  the local depth. `absolute` suits subtitles, which sit at the bottom of the frame over
+  whatever is furthest away; `credits` defaults to `relative` because a credit lands
+  anywhere, and a constant plane over a face in the near field can end up *further forward
+  than the corruption it is replacing*. On a credit across a subject's shoulder the text
+  stood 240 codes proud of its surroundings untouched, 243 after an absolute repair, and 80
+  after a relative one
 - `--heal edt|none` and `--heal-scope glyph|region` - repair the smear around the strokes
   (default) or flatten the whole detection box
 - `--dilate N` / `--feather S` - grow and soften the mask edge
