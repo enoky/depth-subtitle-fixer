@@ -266,6 +266,11 @@ tall a region had to be on that clip to be looked at at all.
 - `--luma-tol` - colour tolerance when following a glyph's outline (the fill is found by
   opacity, which is what makes fades work)
 - `--polarity auto|light|dark` - override if a clip's text is consistently mis-read
+- `--depth-tol` / `--chroma-tol` - how far one glyph may sit from the depth, or the colour,
+  that the rest of its line shares before it is treated as something else that happened to
+  be inside the box. `--depth-tol` needs the depth map to be supplied to the detection pass,
+  which `dsf fix`, `dsf preview` and the app all do; `dsf detect` takes an optional
+  `--depth` for it. `0` disables either. See *Two things in one box*, below.
 
 **Repairing the depth**
 
@@ -305,6 +310,27 @@ tall a region had to be on that clip to be looked at at all.
    snapping. Below roughly 25% opacity a faded credit is quieter than the scene's own detail
    at stroke scale, and no single-frame method can recover it; `--temporal max` borrows from
    neighbouring frames there.
+   **Two things in one box.** The residual is measured on luma, so anything inside the
+   detection box as bright as the glyphs answers it exactly as a glyph does - right area,
+   right thickness, right strength - and gets masked with them. A background object the
+   colour of the text is the case, and nothing in the luma channel can separate the two.
+
+   Two things can. Burned-in text is one flat colour, and DepthCrafter pastes it onto one
+   flat slab of wrong depth - that slab being the whole reason this tool exists. So each
+   blob is asked whether it agrees with the blobs around it, on depth and on hue, and the
+   ones that do not are dropped. Both are vetoes and both give ground rather than guess: the
+   bar scales with how much the line's own letters disagree among themselves, marks too
+   small for a blurred depth map to resolve sit the vote out, and if the majority does not
+   agree in the first place the test stands down entirely and masks everything it found.
+   That last one is what keeps a shot safe where the depth map never responded to the text -
+   there the letters take the depth of the wall behind them, and a wall receding across the
+   shot would otherwise cost the far end of every line.
+
+   The defaults are set from measurement, not taste. On 136 boxes of real subtitles a fixed
+   0.06 depth tolerance threw a letter away from 43% of them, because the slab is nowhere
+   near as flat as the text is; the shipped settings leave all 136 intact. The colour test
+   is the weaker of the two by construction - the hard cases are the ones where the object
+   matches the text's hue as well as its brightness - but it needs no depth map.
 4. **Smooth** - a temporal median (or max, for credits) across a small window kills detector
    flicker. It is applied to the stroke *shape* only, and each frame is then scaled by the
    opacity it measured for itself. Smoothing the finished mask instead would drag a fading
@@ -317,6 +343,11 @@ tall a region had to be on that clip to be looked at at all.
 Everything streams frame by frame, so clip length is limited by disk, not RAM. The depth
 luma plane is decoded in its source pixel format and written back untouched outside the
 mask - no colour-range rescale, no 8-bit round trip.
+
+When the depth agreement test is in use the depth map is decoded twice, once alongside
+detection and once again for compositing, which cost 12% of the detection rate on a 1080p
+clip. Holding a clip's depth from the first pass to hand back at the second is exactly the
+unbounded buffer this design exists to avoid, so it is decoded again instead.
 
 Decoding runs a chunk ahead of detection on its own thread, because otherwise the two take
 turns: ffmpeg idles while the GPU works and the GPU idles while ffmpeg decodes. Measured on

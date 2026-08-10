@@ -25,6 +25,7 @@ from scipy.ndimage import binary_erosion, binary_fill_holes
 
 from ..config import StrokeConfig
 from ..detect.base import Detection
+from ..filters import chromaticity
 
 
 @dataclass
@@ -235,6 +236,7 @@ def _decide_polarity(lum: np.ndarray, white: np.ndarray, black: np.ndarray,
        This is the question that actually distinguishes them.
     3. If containment is a wash, fall back to colour flatness: the strokes are one flat
        colour while the gaps between them inherit whatever the shot is doing.
+
     """
     ratio = w_peak / max(b_peak, 1e-6)
     if ratio > cfg.polarity_ratio:
@@ -345,9 +347,108 @@ def _stroke_width(mask: np.ndarray) -> float:
     return float(dist.max()) * 2.0
 
 
-def extract_patch(frame: np.ndarray, det: Detection,
-                  cfg: StrokeConfig) -> AlphaPatch | None:
-    """Extract a soft glyph alpha for one detection. Returns None if nothing survives."""
+#: Blobs a crop needs before the agreement tests will speak at all. With two there is no
+#: majority to be the odd one out of.
+_MIN_CLUSTER = 3
+
+#: How many times the blobs' own scatter a blob must be out by, on top of the configured
+#: floor, before it is rejected. Measured on a 1080p subtitled clip: across 136 boxes of
+#: *entirely genuine* text, the furthest letter from its line's median already sat 5.9
+#: scatters out at the median box and 605 at the worst, because a line whose letters agree
+#: almost exactly has a scatter of nearly zero. So this cannot be the whole bar - the floor
+#: does most of the work - but it is what covers the shots where the slab is genuinely
+#: uneven: with a 0.10 floor alone, 18% of those boxes lost a letter, and with this term as
+#: well, none of them did.
+_SCATTER_K = 8.0
+
+#: Share of the crop's median blob area below which a blob neither votes nor can be rejected.
+#: A depth map arrives blurred and often at a lower resolution than the picture, so a mark
+#: much smaller than the letters around it has no depth of its own to read - what comes back
+#: is the halo over it. The full stop ending a subtitle is the case that showed this: at a
+#: twentieth the area of the letters it measured a depth of its own that no letter shared,
+#: and was thrown out of every line that ended in one. Small *intruders* escaping with it is
+#: the accepted cost, and they are what `min_cc_area` and the temporal prior are already for.
+_MIN_JUDGED_AREA_FRAC = 0.5
+
+
+def _blob_median(values: np.ndarray, blob: np.ndarray, strength: np.ndarray,
+                 valid: np.ndarray | None = None, min_samples: int = 8):
+    """Median of *values* over the strong half of one blob, or None if it cannot answer.
+
+    The strong half rather than the whole blob, for the same reason `_colour_spread` samples
+    that way: a stroke's outer pixels are part background by construction, so including them
+    drags every blob's reading toward the picture behind it and makes all of them look alike -
+    which is precisely the difference these tests are trying to measure.
+    """
+    sel = blob if valid is None else (blob & valid)
+    if int(sel.sum()) < min_samples:
+        return None
+    weight = strength[sel]
+    return np.median(values[sel][weight >= np.median(weight)], axis=0)
+
+
+def _keep_agreeing(blobs: list[np.ndarray], values: np.ndarray | None, tol: float,
+                   min_agree: float, strength: np.ndarray,
+                   valid: np.ndarray | None = None) -> list[np.ndarray]:
+    """Drop the blobs whose median *values* disagree with the value most blobs share.
+
+    One line of burned-in text is one thing: one flat colour, and - once DepthCrafter has
+    pasted it onto a slab of wrong depth - one depth. Its glyphs therefore agree with each
+    other on both. An object *behind* the text that happens to match its luma is under no
+    such obligation, and luma is all the residual can see. This is the argument
+    `_colour_spread` makes about the sign of the residual, asked one blob at a time and on
+    the axes where the luma test has nothing left to say.
+
+    A veto, never a requirement, and it gives ground twice over.
+
+    The bar it holds blobs to is the configured floor *or* several times the blobs' own
+    scatter, whichever is larger. A fixed distance cannot do this job: how flat a slab
+    DepthCrafter lays over a given credit varies from shot to shot, so the same tolerance
+    that is generous on one line is measuring quantisation noise on the next. Scaling by
+    what the line's own letters do makes the question "is this blob out by more than the
+    others manage between themselves", which is the question actually being asked.
+
+    And it stands down entirely whenever the majority does not agree even at that bar,
+    because that means the crop is not reading one flat thing: text too small for
+    DepthCrafter to have responded to takes the depth of whatever is behind it, and a wall
+    receding across the shot then hands every letter a different answer. Rejecting on that
+    would bite the far end off the line, so a scattered vote means "this crop cannot answer",
+    not "keep whichever blob sat at the median".
+    """
+    if values is None or tol <= 0 or len(blobs) < _MIN_CLUSTER:
+        return blobs
+    areas = np.array([int(blob.sum()) for blob in blobs], dtype=np.float32)
+    judged = areas >= _MIN_JUDGED_AREA_FRAC * float(np.median(areas))
+    medians = [_blob_median(values, blob, strength, valid) if ok else None
+               for blob, ok in zip(blobs, judged)]
+    answered = [i for i, m in enumerate(medians) if m is not None]
+    if len(answered) < _MIN_CLUSTER:
+        return blobs
+
+    stack = np.asarray([medians[i] for i in answered], dtype=np.float32)
+    # Median rather than mean, and no assumption about which way the odd one out lies: the
+    # convention for whether near is bright or dark is the depth model's business, not ours.
+    delta = stack - np.median(stack, axis=0)
+    distance = np.abs(delta) if delta.ndim == 1 else np.linalg.norm(delta, axis=1)
+    bar = max(float(tol), _SCATTER_K * float(np.median(distance)))
+    agrees = distance <= bar
+    if float(agrees.mean()) < min_agree:
+        return blobs
+
+    rejected = {answered[j] for j, ok in enumerate(agrees) if not ok}
+    return [blob for i, blob in enumerate(blobs) if i not in rejected]
+
+
+def extract_patch(frame: np.ndarray, det: Detection, cfg: StrokeConfig,
+                  depth: np.ndarray | None = None) -> AlphaPatch | None:
+    """Extract a soft glyph alpha for one detection. Returns None if nothing survives.
+
+    *depth* is the corrupted depth map itself, as a full-frame float32 in [0, 1] at this
+    frame's resolution - `dsf.pipeline.depth_guide` builds one. It is only ever used to
+    reject blobs that cannot be part of the same text, never to find text: the map is the
+    thing being repaired, and how strongly it responded to any given credit is not something
+    to bet a glyph on. Without it the extraction is exactly what it was.
+    """
     h, w = frame.shape[:2]
     x0, y0, x1, y1 = det.bbox
     x0, y0 = max(0, x0 - cfg.pad), max(0, y0 - cfg.pad)
@@ -368,7 +469,9 @@ def extract_patch(frame: np.ndarray, det: Detection,
     if not binary.any():
         return None
 
-    kept = _filter_components(binary, cfg, det.height, shape=stats.shape)
+    kept = _filter_components(binary, cfg, det.height, shape=stats.shape,
+                              depth=depth[y0:y1, x0:x1] if depth is not None else None,
+                              chroma=chromaticity(crop) if cfg.chroma_tol > 0 else None)
     if kept is None:
         return None
 
@@ -401,17 +504,25 @@ def stroke_bounds(cfg: StrokeConfig, text_height: float) -> tuple[float, float]:
 
 
 def _filter_components(binary: np.ndarray, cfg: StrokeConfig, text_height: float = 0.0,
-                       shape: np.ndarray | None = None) -> np.ndarray | None:
+                       shape: np.ndarray | None = None,
+                       depth: np.ndarray | None = None,
+                       chroma: tuple[np.ndarray, np.ndarray] | None = None
+                       ) -> np.ndarray | None:
     """Drop connected components that do not look like glyph strokes.
 
-    One of the tests is about strength rather than form: a credit fades as a whole, so every
-    glyph in it shares one opacity, and ``shape`` is normalised so that opacity reads as 1.
-    A blob markedly fainter than that is not part of the same text.
+    Two kinds of test, in two passes. The first asks of each blob on its own whether it is
+    shaped and lit like a stroke - area, span, thickness, and strength relative to the
+    strongest text in the same crop, since a credit fades as a whole and ``shape`` is
+    normalised so that shared opacity reads as 1. That last one matters most part-way through
+    a fade: the normalisation divides by whatever the text is showing at, so while it is
+    faint the divisor is small and everything else in the frame is amplified with it - a lit
+    building edge behind the credit crosses the threshold and lands in the mask as a speck.
 
-    This matters most part-way through a fade. The normalisation divides by whatever the
-    text is showing at, so while it is faint the divisor is small and everything else in the
-    frame is amplified with it - a lit building edge behind the credit crosses the threshold
-    and lands in the mask as a speck.
+    The second pass asks whether the survivors agree with *each other*, on the axes the luma
+    residual is blind to. A background object the same brightness as the text answers the
+    residual exactly as a glyph does and passes every test in the first pass; what gives it
+    away is that it is not at the text's depth, and often not its colour either. See
+    `_keep_agreeing`. Both are optional and both stand down rather than guess.
     """
     ch, cw = binary.shape
     crop_area = ch * cw
@@ -420,9 +531,8 @@ def _filter_components(binary: np.ndarray, cfg: StrokeConfig, text_height: float
     if n <= 1:
         return None
 
-    keep = np.zeros(binary.shape, dtype=np.float32)
-    any_kept = False
     max_span_w, max_span_h = cw - 1, ch - 1
+    blobs: list[np.ndarray] = []
 
     for label in range(1, n):
         x, y, bw, bh, area = stats[label]
@@ -441,11 +551,24 @@ def _filter_components(binary: np.ndarray, cfg: StrokeConfig, text_height: float
         if not (min_stroke <= sw <= max_stroke):
             continue
 
-        keep[comp] = 1.0
-        any_kept = True
+        blobs.append(comp)
 
-    if not any_kept:
+    if not blobs:
         return None
+
+    # Where a blob's reading is sampled from. Without a normalised shape every pixel of a
+    # blob counts equally, which is what the tests that call this directly expect.
+    strength = shape if shape is not None else binary.astype(np.float32)
+    blobs = _keep_agreeing(blobs, depth, cfg.depth_tol, cfg.cluster_min_agree, strength)
+    if chroma is not None:
+        blobs = _keep_agreeing(blobs, chroma[0], cfg.chroma_tol, cfg.cluster_min_agree,
+                               strength, valid=chroma[1])
+    if not blobs:
+        return None
+
+    keep = np.zeros(binary.shape, dtype=np.float32)
+    for blob in blobs:
+        keep[blob] = 1.0
 
     # Let the soft edges of surviving strokes back in: dilate the keep-mask by one pixel so
     # anti-aliased boundary pixels (alpha between 0 and 0.5) are not clipped off.

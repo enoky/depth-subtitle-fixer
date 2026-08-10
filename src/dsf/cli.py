@@ -45,6 +45,9 @@ ARG_MAP: list[tuple[str, str, str]] = [
     ("solidify", "strokes", "solidify"),
     ("luma_tol", "strokes", "luma_tol"),
     ("rim_expand", "strokes", "rim_expand"),
+    ("depth_tol", "strokes", "depth_tol"),
+    ("chroma_tol", "strokes", "chroma_tol"),
+    ("cluster_min_agree", "strokes", "cluster_min_agree"),
     ("temporal", "temporal", "mode"),
     ("temporal_window", "temporal", "window"),
     ("prior_window", "temporal", "prior_window"),
@@ -113,6 +116,19 @@ def add_detect_args(p: argparse.ArgumentParser) -> None:
     g.add_argument("--rim-expand", type=int,
                    help="px to grow the mask into a hard drawn outline (default 0; raise it "
                         "for outlined subtitles, leave it off for shadowed credits)")
+    g.add_argument("--depth-tol", type=float,
+                   help="floor under how far one glyph's depth may sit from the depth the "
+                        "whole line reads at, as a fraction of the code range (default "
+                        "0.10; the real bar also scales with how much the line's own "
+                        "letters disagree). This is what stops an object behind the text "
+                        "that happens to match its brightness being masked along with the "
+                        "glyphs; needs --depth to be supplied, and 0 disables it")
+    g.add_argument("--chroma-tol", type=float,
+                   help="the same test on colour (default 0.08); 0 disables it")
+    g.add_argument("--cluster-min-agree", type=float,
+                   help="how much of a box must agree before either test may reject the "
+                        "rest (default 0.6); below it both stand down and mask everything "
+                        "they found")
     g.add_argument("--temporal", choices=("median", "max", "none"),
                    help="temporal mask filter")
     g.add_argument("--temporal-window", type=int, help="frames in the temporal filter")
@@ -234,7 +250,8 @@ def cmd_detect(args) -> int:
     progress, task = _progress("detecting text", total)
     with progress, MaskCacheWriter(args.out_mask, info.width, info.height, info.fps,
                                    args.rgb, cfg.to_dict()) as cache:
-        for mask in iter_masks(args.rgb, cfg, info, max_frames=args.max_frames):
+        for mask in iter_masks(args.rgb, cfg, info, max_frames=args.max_frames,
+                               depth_path=args.depth, depth_start=args.depth_offset):
             cache.write(mask)
             progress.update(task, advance=1)
     print(f"wrote {cache.frames} masks to {args.out_mask}")
@@ -332,6 +349,9 @@ def build_parser() -> argparse.ArgumentParser:
     p = sub.add_parser("detect", help="detect text and cache the masks")
     p.add_argument("--rgb", required=True, help="source RGB clip")
     p.add_argument("--out-mask", required=True, help="mask cache to write (.mkv recommended)")
+    p.add_argument("--depth", help="optional: the depth map, used to reject blobs that are "
+                                   "not at the text's depth. Nothing is written to it here")
+    p.add_argument("--depth-offset", type=int, default=0)
     p.add_argument("--max-frames", type=int)
     add_detect_args(p)
     p.set_defaults(func=cmd_detect)

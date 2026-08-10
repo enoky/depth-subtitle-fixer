@@ -134,6 +134,31 @@ class StrokeConfig:
     #: shadow that title cards usually carry leaves a speckled crust on every glyph.
     rim_expand: int = 0
 
+    # The two agreement vetoes. The residual is measured on luma alone, so an object behind
+    # the text that happens to match its brightness answers exactly as a glyph does and lands
+    # in the mask with them. Neither of these looks for text; they ask whether each blob is
+    # the same *thing* as the blobs around it, on an axis luma cannot see.
+
+    #: The *floor* under how far one blob's median depth may sit from the depth the crop's
+    #: blobs share, as a fraction of the depth map's legal code range - the real bar also
+    #: scales with how much the blobs disagree among themselves. This is the strong one:
+    #: burned-in text is pasted onto one flat slab of wrong depth, which is the whole reason
+    #: this tool exists, and an object genuinely behind it is not on that slab. Set from
+    #: measurement rather than taste: on 136 boxes of real subtitles a 0.06 floor threw away
+    #: a letter from 43% of them, because DepthCrafter's slab is nowhere near as flat as the
+    #: text is. Does nothing unless a depth map is handed to the extractor; 0 disables it.
+    depth_tol: float = 0.10
+    #: The same test on normalised chroma. Weaker - the hard cases are the ones where the
+    #: background object matches the text's hue as well as its luma - but it costs nothing
+    #: and needs no depth map. 0 disables it.
+    chroma_tol: float = 0.08
+    #: What fraction of a crop's blobs must agree before either test may reject the rest.
+    #: Below it the crop is not reading one flat thing at all - depth that never responded to
+    #: small text takes the shape of whatever is behind it, and a wall receding across the
+    #: shot then hands every letter a different answer - so the test stands down rather than
+    #: eating the far end of the line.
+    cluster_min_agree: float = 0.60
+
 
 @dataclass(frozen=True)
 class TemporalConfig:
