@@ -83,7 +83,8 @@ def write_previews(rgb_path: str, depth_path: str, frame_indices: Sequence[int],
 
     frames = sample_frames(rgb_path, frame_indices)
     depths = sample_depth(depth_path, frame_indices, depth_info)
-    masks = masks_for_frames(rgb_path, cfg, frame_indices, rgb_info)
+    masks = masks_for_frames(rgb_path, cfg, frame_indices, rgb_info,
+                             depth_path=depth_path, depth_info=depth_info)
 
     written: list[Path] = []
     for idx in sorted(frames):

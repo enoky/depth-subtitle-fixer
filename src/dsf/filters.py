@@ -56,6 +56,22 @@ def luminance(rgb: np.ndarray) -> np.ndarray:
     return (0.2126 * a[..., 0] + 0.7152 * a[..., 1] + 0.0722 * a[..., 2]) / 255.0
 
 
+def chromaticity(rgb: np.ndarray) -> tuple[np.ndarray, np.ndarray]:
+    """Normalised ``(r, g)`` and a mask of the pixels bright enough to have a hue.
+
+    Chromaticity is a ratio, and a ratio between near-zero numbers is quantisation noise: a
+    pixel of (1, 0, 0) is black, but reads as saturated red. Text dark enough to sit there
+    scored a colour spread of 0.18 against a limit of 0.14 and was rejected for being
+    multicoloured - which black is not. So the mask says where there is enough signal to have
+    a hue at all, and callers ignore the rest.
+
+    Shape-agnostic: takes a whole HxWx3 image or a flat list of pixels, and answers in kind.
+    """
+    a = np.asarray(rgb, dtype=np.float32)
+    total = a.sum(axis=-1)
+    return a[..., :2] / np.maximum(total, 1.0)[..., None], total >= _CHROMA_FLOOR
+
+
 class GeometryFilter:
     """Region-of-interest, text size and aspect ratio gates."""
 
@@ -114,22 +130,14 @@ def appearance_ok(frame: np.ndarray, det: Detection, cfg: FilterConfig) -> bool:
         return False
 
     # Colour flatness, measured on the candidate glyph pixels - whichever side those are.
-    sample = glyphs.astype(np.float32)
-    if sample.size == 0:
+    if glyphs.size == 0:
         return False
-    total = sample.sum(axis=1)
-
-    # Chromaticity is a ratio, and a ratio between near-zero numbers is quantisation noise:
-    # a pixel of (1, 0, 0) is black, but reads as saturated red. Text dark enough to sit
-    # there scored a colour spread of 0.18 against a limit of 0.14 and was rejected for
-    # being multicoloured - which black is not. So hue is measured only where there is
-    # enough signal to have one, and glyphs too dark for that are simply black, which is as
-    # flat as a colour gets.
-    lit = total >= _CHROMA_FLOOR
+    chroma, lit = chromaticity(glyphs)
+    # Glyphs too dark to carry a measurable hue are simply black, which is as flat as a
+    # colour gets, so an unanswerable crop passes rather than failing.
     if int(lit.sum()) < 8:
         return True
-    chroma = sample[lit, :2] / total[lit][:, None]  # normalised r, g
-    if float(chroma.std(axis=0).mean()) > cfg.max_chroma_std:
+    if float(chroma[lit].std(axis=0).mean()) > cfg.max_chroma_std:
         return False
     return True
 

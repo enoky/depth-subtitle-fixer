@@ -96,7 +96,9 @@ class Session:
         if index not in self.mask_cache:
             result = masks_for_frames(self.rgb_path, cfg, [index], self.rgb_info,
                                       detectors=self.get_detectors(cfg),
-                                      progress=progress)
+                                      progress=progress,
+                                      depth_path=self.depth_path,
+                                      depth_info=self.depth_info)
             self.mask_cache[index] = result.get(
                 index, (np.zeros((self.rgb_info.height, self.rgb_info.width), np.uint8), []))
         return self.mask_cache[index]

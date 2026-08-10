@@ -15,7 +15,7 @@ import cv2
 import numpy as np
 
 from . import accel
-from .composite import composite_frame, resize_alpha
+from .composite import code_range, composite_frame, resize_alpha, resolve_range
 from .config import PipelineConfig
 from .detect import build_detectors
 from .detect.base import Detection, merge_detections
@@ -53,24 +53,93 @@ def _chunks(iterable, size: int) -> Iterator[list]:
         yield batch
 
 
+def depth_guide(plane: np.ndarray, info: VideoInfo, width: int, height: int,
+                cfg: PipelineConfig) -> np.ndarray:
+    """One depth frame as a float32 [0, 1] plane the size of the RGB frame it describes.
+
+    Two conversions, both so that `StrokeConfig.depth_tol` means one thing everywhere.
+    Normalising over the *legal* code range rather than the raw integer range makes the
+    tolerance the same fraction of the picture whether the map arrived tv- or pc-range; and
+    scaling to the RGB size means a crop taken from this lines up with the same crop of the
+    frame, which matters because DepthCrafter routinely answers at a different resolution
+    than the clip it was given. Linear rather than area: the guide is read as a level, and
+    the extractor already samples the inside of each stroke to stay off the resampled edges.
+    """
+    lo, hi = code_range(info.bit_depth, resolve_range(cfg.composite, info.color_range))
+    guide = (plane.astype(np.float32) - lo) / max(hi - lo, 1.0)
+    if guide.shape != (height, width):
+        guide = cv2.resize(guide, (width, height), interpolation=cv2.INTER_LINEAR)
+    return np.clip(guide, 0.0, 1.0)
+
+
+def _guides(depth_path: str, cfg: PipelineConfig, depth_info: VideoInfo, width: int,
+            height: int, start: int, seek_frame: int) -> Iterator[np.ndarray]:
+    for unit in read_depth(depth_path, depth_info, start=start, seek_frame=seek_frame):
+        yield depth_guide(unit.plane, depth_info, width, height, cfg)
+
+
+def _with_guides(frames: Iterator[np.ndarray],
+                 guides: Iterator[np.ndarray] | None) -> Iterator[tuple]:
+    """Pair each RGB frame with its depth guide, or with None when there is no depth map.
+
+    A generator rather than a bare `zip` so that closing it closes both readers. `prefetch`
+    owns the stream it is handed and closes it when the consumer stops early - which it does
+    on every clip that has seen enough - and a zip object has no `close` to call, so the
+    ffmpeg processes underneath would be left to whenever the garbage collector got round to
+    them. The pair runs short as soon as either side does, which is what `check_alignment`
+    warns about when the two streams are different lengths.
+    """
+    try:
+        if guides is None:
+            for frame in frames:
+                yield frame, None
+            return
+        for pair in zip(frames, guides):
+            yield pair
+    finally:
+        frames.close()
+        if guides is not None:
+            guides.close()
+
+
 def iter_frame_items(rgb_path: str, cfg: PipelineConfig, info: VideoInfo,
                      start: int = 0, max_frames: int | None = None,
                      seek_frame: int = 0,
                      progress: ProgressFn | None = None,
-                     detectors: Sequence | None = None) -> Iterator[FrameItem]:
-    """Detect text and extract glyph patches, one frame at a time."""
+                     detectors: Sequence | None = None,
+                     depth_path: str | None = None,
+                     depth_info: VideoInfo | None = None,
+                     depth_start: int = 0) -> Iterator[FrameItem]:
+    """Detect text and extract glyph patches, one frame at a time.
+
+    With *depth_path* the corrupted depth map is streamed alongside the RGB and handed to the
+    glyph extractor, which uses it to reject blobs that are not on the text's depth. That is
+    a second decode of the same file - the compositor reads it again at render time - and it
+    is left that way on purpose: holding a clip's depth to hand it back later is exactly the
+    unbounded buffer this module streams to avoid, and the decode is small change next to
+    detection.
+    """
     detectors = list(detectors) if detectors else build_detectors(cfg.detect.detectors,
                                                                  cfg.detect)
     geometry = GeometryFilter(cfg.filters, info.width, info.height)
     every = max(1, cfg.detect.detect_every)
     chunk_size = max(1, cfg.detect.batch_size) * every
 
+    guides = None
+    if depth_path is not None:
+        depth_info = depth_info or probe(depth_path)
+        guides = _guides(depth_path, cfg, depth_info, info.width, info.height,
+                         depth_start, seek_frame)
+
     # Read ahead by up to a chunk, so ffmpeg decodes the next batch while this one is going
     # through the detector instead of the two taking turns. Depth is sized against the frame
     # size rather than fixed, because everything here streams on the promise that clip
-    # length is bounded by disk and not by RAM.
-    frames = prefetch(read_rgb(rgb_path, start=start, seek_frame=seek_frame, info=info),
-                      depth=depth_for(info.width, info.height, chunk_size))
+    # length is bounded by disk and not by RAM - so the budget has to know that a queued item
+    # is now three bytes of RGB per pixel plus four of float32 guide, not three.
+    frames = prefetch(_with_guides(read_rgb(rgb_path, start=start, seek_frame=seek_frame,
+                                            info=info), guides),
+                      depth=depth_for(info.width, info.height, chunk_size,
+                                      channels=3 if guides is None else 7))
 
     try:
         yield from _detect_chunks(frames, chunk_size, every, detectors, geometry, cfg,
@@ -92,7 +161,7 @@ def _detect_chunks(frames, chunk_size: int, every: int, detectors, geometry,
         todo = [i for i in range(len(chunk)) if (index + i) % every == 0]
         if index == 0 and 0 not in todo:
             todo.insert(0, 0)
-        batch = [chunk[i] for i in todo]
+        batch = [chunk[i][0] for i in todo]
 
         per_detector = [d.detect(batch) for d in detectors]
         results: dict[int, list[Detection]] = {}
@@ -100,7 +169,7 @@ def _detect_chunks(frames, chunk_size: int, every: int, detectors, geometry,
             groups = [res[slot].detections for res in per_detector]
             results[i] = merge_detections(groups)
 
-        for i, frame in enumerate(chunk):
+        for i, (frame, guide) in enumerate(chunk):
             if max_frames is not None and index >= max_frames:
                 return
             if i in results:
@@ -109,7 +178,7 @@ def _detect_chunks(frames, chunk_size: int, every: int, detectors, geometry,
                     dets = [d for d in dets if appearance_ok(frame, d, cfg.filters)]
                 patches = []
                 for det in dets:
-                    patch = extract_patch(frame, det, cfg.strokes)
+                    patch = extract_patch(frame, det, cfg.strokes, depth=guide)
                     if patch is not None:
                         patches.append(patch)
                 carry = (dets, patches)
@@ -230,17 +299,24 @@ def remembered(stream: Iterator[tuple], cfg: PipelineConfig, ops=None) -> Iterat
 def iter_masks_detailed(rgb_path: str, cfg: PipelineConfig, info: VideoInfo | None = None,
                         start: int = 0, max_frames: int | None = None, seek_frame: int = 0,
                         progress: ProgressFn | None = None,
-                        detectors: Sequence | None = None
+                        detectors: Sequence | None = None,
+                        depth_path: str | None = None,
+                        depth_info: VideoInfo | None = None,
+                        depth_start: int = 0
                         ) -> Iterator[tuple[np.ndarray, list[Detection]]]:
     """Yield ``(mask, accepted detections)`` per frame, fully gated and smoothed.
 
     The masks come back as ndarrays whichever backend produced them, so every caller of this
     is unaffected by there being a GPU. Inside, the chain stays on that backend end to end -
     a frame that went up as patches comes down once, as the finished mask.
+
+    *depth_path* is optional throughout: without it the masks are exactly what they were.
     """
     info = info or probe(rgb_path)
     items = iter_frame_items(rgb_path, cfg, info, start=start, max_frames=max_frames,
-                             seek_frame=seek_frame, progress=progress, detectors=detectors)
+                             seek_frame=seek_frame, progress=progress, detectors=detectors,
+                             depth_path=depth_path, depth_info=depth_info,
+                             depth_start=depth_start)
 
     # Ring depths, in frames, for the buffers the backend hands out. A buffer must outlive
     # every window that can still be holding it, so each of these is the window that holds
@@ -286,11 +362,15 @@ def iter_masks_detailed(rgb_path: str, cfg: PipelineConfig, info: VideoInfo | No
 def iter_masks(rgb_path: str, cfg: PipelineConfig, info: VideoInfo | None = None,
                start: int = 0, max_frames: int | None = None, seek_frame: int = 0,
                progress: ProgressFn | None = None,
-               detectors: Sequence | None = None) -> Iterator[np.ndarray]:
+               detectors: Sequence | None = None,
+               depth_path: str | None = None, depth_info: VideoInfo | None = None,
+               depth_start: int = 0) -> Iterator[np.ndarray]:
     """Yield uint8 alpha masks at RGB resolution, fully gated and temporally smoothed."""
     for mask, _ in iter_masks_detailed(rgb_path, cfg, info, start=start,
                                        max_frames=max_frames, seek_frame=seek_frame,
-                                       progress=progress, detectors=detectors):
+                                       progress=progress, detectors=detectors,
+                                       depth_path=depth_path, depth_info=depth_info,
+                                       depth_start=depth_start):
         yield mask
 
 
@@ -357,7 +437,8 @@ def run_fix(rgb_path: str, depth_path: str, out_path: str, cfg: PipelineConfig,
         warnings.warn(note)
 
     masks = iter_masks(rgb_path, cfg, rgb_info, start=rgb_offset, max_frames=max_frames,
-                       progress=on_detect)
+                       progress=on_detect, depth_path=depth_path, depth_info=depth_info,
+                       depth_start=depth_offset)
 
     cache = None
     if mask_cache:
@@ -438,12 +519,16 @@ def context_frames(cfg: PipelineConfig, index: int) -> int:
 def masks_for_frames(rgb_path: str, cfg: PipelineConfig, indices: Sequence[int],
                      info: VideoInfo | None = None,
                      detectors: Sequence | None = None,
-                     progress: ProgressFn | None = None
+                     progress: ProgressFn | None = None,
+                     depth_path: str | None = None,
+                     depth_info: VideoInfo | None = None,
+                     depth_start: int = 0
                      ) -> dict[int, tuple[np.ndarray, list[Detection]]]:
     """Compute ``(mask, detections)`` for a handful of specific frames.
 
     Each frame is processed with a small window of real context around it, so the
-    persistence and temporal gates behave the same as they would in a full render.
+    persistence and temporal gates behave the same as they would in a full render - and,
+    when a depth map is given, so the preview shows the same mask the render will produce.
     """
     info = info or probe(rgb_path)
     radius = context_radius(cfg)
@@ -453,7 +538,8 @@ def masks_for_frames(rgb_path: str, cfg: PipelineConfig, indices: Sequence[int],
         count = (idx - start) + radius + 1
         frames = list(iter_masks_detailed(rgb_path, cfg, info, seek_frame=start,
                                           max_frames=count, detectors=detectors,
-                                          progress=progress))
+                                          progress=progress, depth_path=depth_path,
+                                          depth_info=depth_info, depth_start=depth_start))
         pos = idx - start
         out[idx] = frames[pos] if pos < len(frames) else \
             (np.zeros((info.height, info.width), np.uint8), [])
