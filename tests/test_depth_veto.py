@@ -159,6 +159,44 @@ def test_the_full_stop_ending_a_subtitle_survives():
     assert _covered(patch, letters) > 0.9, "and the letters must be untouched either way"
 
 
+def test_the_tolerance_actually_controls_the_veto():
+    """It silently stopped doing so, and nothing here noticed.
+
+    The bar a blob is held to is the configured floor or a multiple of the blobs' own
+    scatter, whichever is larger. That multiple was calibrated against a measurement taken
+    while the polarity decision was inverting, so the "blobs" measured were the gaps between
+    the glyphs rather than the glyphs - gaps are scattered across whatever the picture is
+    doing, and needed a far wider bar than letters sitting on one slab. The multiple came out
+    at 8x, which on ordinary text puts the scatter term permanently above the floor: every
+    tolerance from 0.10 upwards produced a byte-identical mask and the knob did nothing.
+
+    So this asks the only thing that matters about a control - that turning it changes the
+    answer, monotonically, across the range it is offered over.
+
+    The guide has to give the line a scatter of its own for that to mean anything. A slab
+    with every letter on exactly the same value has a scatter of nearly zero, so the floor
+    governs whatever the multiple is and the fixture passes with the bug still in it - which
+    is how the original tests missed this.
+    """
+    frame, glyphs, objects, box = _scene_with_lookalikes()
+    rng = np.random.default_rng(9)
+    guide = np.full((H, W), 0.50, np.float32)
+    halo = cv2.dilate((glyphs > 0).astype(np.uint8), np.ones((9, 9), np.uint8)) > 0
+    guide[halo] = 0.80
+    count, labels = cv2.connectedComponents(halo.astype(np.uint8))
+    for label in range(1, count):
+        guide[labels == label] += rng.normal(0, 0.025)  # letters wobble off the slab
+    guide[objects > 0] = 0.60                           # and the intruder is a step away
+    guide = cv2.GaussianBlur(guide, (0, 0), 1.5)
+
+    covered = [_covered(_extract(frame, box, StrokeConfig(depth_tol=t), depth=guide),
+                        objects > 0)
+               for t in (0.05, 0.20, 0.60)]
+    assert covered[0] < covered[-1], \
+        f"the tolerance made no difference across its range: {covered}"
+    assert covered == sorted(covered), f"raising it should never veto more: {covered}"
+
+
 def test_depth_tol_of_zero_turns_the_veto_off():
     frame, glyphs, objects, box = _scene_with_lookalikes()
     guide = _slab_guide(glyphs)

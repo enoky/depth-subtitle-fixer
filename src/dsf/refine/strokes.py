@@ -369,14 +369,19 @@ def _stroke_width(mask: np.ndarray) -> float:
 _MIN_CLUSTER = 3
 
 #: How many times the blobs' own scatter a blob must be out by, on top of the configured
-#: floor, before it is rejected. Measured on a 1080p subtitled clip: across 136 boxes of
-#: *entirely genuine* text, the furthest letter from its line's median already sat 5.9
-#: scatters out at the median box and 605 at the worst, because a line whose letters agree
-#: almost exactly has a scatter of nearly zero. So this cannot be the whole bar - the floor
-#: does most of the work - but it is what covers the shots where the slab is genuinely
-#: uneven: with a 0.10 floor alone, 18% of those boxes lost a letter, and with this term as
-#: well, none of them did.
-_SCATTER_K = 8.0
+#: floor, before it is rejected. It exists for the shots where the slab is genuinely uneven,
+#: and it has to stay well under the floor on ordinary ones or it silently becomes the only
+#: bar there is and `depth_tol` stops doing anything.
+#:
+#: It was 8, which did exactly that. The number came from measuring how far a blob sits from
+#: its line's median - but that measurement was taken while the polarity decision was
+#: inverting on the clip it was taken from, so the "blobs" being measured were the gaps
+#: between the glyphs rather than the glyphs. Gaps are scattered across whatever the picture
+#: is doing and needed a wide bar; real letters sit on the slab together and do not. With
+#: that fixed the typical line scatters 0.017, so 8x put the bar at 0.136 - above the 0.10
+#: floor, past double the worst deviation a genuine letter manages (0.089), and unmoved by
+#: the tolerance the user is offered. At 3x it lands near 0.05 and the floor governs again.
+_SCATTER_K = 3.0
 
 #: Share of the crop's median blob area below which a blob neither votes nor can be rejected.
 #: A depth map arrives blurred and often at a lower resolution than the picture, so a mark

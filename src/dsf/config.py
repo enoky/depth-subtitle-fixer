@@ -142,9 +142,12 @@ class StrokeConfig:
     #: scales with how much the blobs disagree among themselves. This is the strong one:
     #: burned-in text is pasted onto one flat slab of wrong depth, which is the whole reason
     #: this tool exists, and an object genuinely behind it is not on that slab. Set from
-    #: measurement rather than taste: on 136 boxes of real subtitles a 0.06 floor threw away
-    #: a letter from 43% of them, because DepthCrafter's slab is nowhere near as flat as the
-    #: text is. Does nothing unless a depth map is handed to the extractor; 0 disables it.
+    #: measurement rather than taste, on a clip with no intruders in it at all, so that
+    #: anything the veto takes there is a false positive by construction: across its 303
+    #: boxes a 0.06 floor cost a blob from 19% of them and 0.10 costs none. Turning it down
+    #: below the default trades that safety for reach, and is the knob to reach for when
+    #: something behind the text is surviving. Does nothing unless a depth map is handed to
+    #: the extractor; 0 disables it.
     depth_tol: float = 0.10
     #: The same test on normalised chroma. Weaker - the hard cases are the ones where the
     #: background object matches the text's hue as well as its luma - but it costs nothing
