@@ -26,6 +26,12 @@ def test_profiles_differ_where_it_matters():
     assert credits.filters.allow_vertical_scroll
     # Propagating a mask between frames is only sound for text that holds still.
     assert credits.detect.detect_every == 1
+    # A subtitle sits over the far end of the shot, so a constant plane near the camera is
+    # where it belongs. A credit lands anywhere - often over a face in the near field - and
+    # a constant plane there can put the text further forward than the corruption it is
+    # replacing, leaving the frame worse than untouched.
+    assert subs.composite.brightness_mode == "absolute"
+    assert credits.composite.brightness_mode == "relative"
 
 
 def test_unknown_profile_is_rejected():

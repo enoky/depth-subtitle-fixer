@@ -245,6 +245,16 @@ PROFILES: dict[str, dict] = {
         },
         "detect": {"detect_every": 1},
         "temporal": {"mode": "max", "window": 3},
+        # A subtitle sits over whatever is furthest away, at the bottom of the frame, so a
+        # constant plane near the camera is where it belongs. A credit lands anywhere,
+        # routinely across a face or a shoulder in the near field, and the absolute default
+        # then places it *in front of the corruption it is replacing*: measured on a credit
+        # over a subject's shoulder, the depth behind the text read 515, DepthCrafter had
+        # pulled the glyphs to 772, and brightness 0.92 stamped them at 870. The text stood
+        # 240 codes proud of its surroundings before the repair and 252 after it - worse than
+        # leaving the frame alone. Placing it just in front of the local depth instead took
+        # that to 67.
+        "composite": {"brightness_mode": "relative"},
     },
     "both": {
         "filters": {"roi": "full", "min_persist_frames": 2, "allow_vertical_scroll": True},
