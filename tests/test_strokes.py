@@ -240,6 +240,76 @@ def test_a_coloured_credit_over_a_busy_shot_is_not_read_inside_out(seed, backgro
     assert off_text < int((fill > 200).sum()), "the mask followed the gaps, not the strokes"
 
 
+def test_a_solid_coloured_credit_is_stamped_at_full_strength():
+    """The opacity model measures light text against white, and amber is not white.
+
+    A pixel of text colour T over background B at opacity a reads a*T + (1-a)*B, so the
+    residual divided by (T - B) returns a. Taking T as pure white divides by too much
+    whenever the text is not: an amber credit at luma 0.77 over a shot at 0.15 divides by
+    0.85 where 0.62 was wanted, reports a fully opaque credit as 0.76, and leaves a quarter
+    of the corruption it was meant to bury showing back through the letters.
+
+    Reading each channel against the same reference and keeping the loudest fixes it: a
+    bright saturated colour is bright because some channel is at its maximum - amber is
+    (255, 190, 80), so in red it *is* white - and that channel's answer is the honest one.
+    """
+    scene = np.full((300, 900, 3), 38, np.uint8)
+    frame, fill, _ = draw_subtitle_full(scene, "CREDIT NAME", font_size=52, stroke=0,
+                                        fill=(255, 190, 80), outline=(255, 190, 80))
+    x0, y0, x1, y1 = text_bbox(fill)
+    patch = _extract(frame, (x0 - 8, y0 - 8, x1 + 8, y1 + 8))
+    assert patch is not None
+    interior = cv2.erode((fill > 200).astype(np.uint8), np.ones((5, 5), np.uint8)).astype(bool)
+    alpha = compose_alpha([patch], 300, 900)
+    measured = float(np.median(alpha[interior]))
+    assert measured > 0.92, \
+        f"a solid credit was stamped at {measured:.2f}, so the depth is only pushed that far"
+
+
+def test_reading_the_colour_does_not_disturb_a_fade():
+    """The reason the reference was pinned to white in the first place.
+
+    White text answers identically in all three channels, so the loudest is the luma answer
+    and nothing moves. A credit at 40% has to keep reporting 40%, or the depth snaps to full
+    the moment the text appears instead of easing in with it.
+    """
+    levels = {}
+    for opacity in (0.4, 0.7, 1.0):
+        frame, cover, box = _faded_credit(opacity)
+        patch = _extract(frame, box)
+        assert patch is not None
+        levels[opacity] = float(compose_alpha([patch], frame.shape[0],
+                                              frame.shape[1])[cover > 200].mean())
+    for opacity, measured in levels.items():
+        assert abs(measured - opacity) < 0.15, \
+            f"opacity {opacity} came back as {measured:.2f}; masks: {levels}"
+    assert levels[0.4] < levels[0.7] < levels[1.0]
+
+
+def test_the_colour_reading_cannot_rescue_text_that_is_barely_showing():
+    """It may refine a reading, never resurrect one.
+
+    A filmed shop sign is an opaque colour too, so the colour pass is right about it and
+    that is worth nothing here - it must keep its real depth. On the demo clip such a sign
+    reads 0.38 in luma and 0.62 in colour, which is the difference between a mask that does
+    nothing and a slab stamped over scenery. Below half showing the reading stands.
+    """
+    from dsf.refine.strokes import _TOO_FAINT_TO_REREAD, analyse_crop
+
+    scene = np.full((300, 900, 3), 120, np.uint8)
+    frame, fill, _ = draw_subtitle_full(scene, "OPEN 24H", font_size=52, stroke=0,
+                                        fill=(90, 180, 200), outline=(90, 180, 200))
+    x0, y0, x1, y1 = text_bbox(fill)
+    crop = frame[y0 - 12:y1 + 12, x0 - 12:x1 + 12].astype(np.float32)
+    lum = (0.2126 * crop[..., 0] + 0.7152 * crop[..., 1] + 0.0722 * crop[..., 2]) / 255.0
+    plain = analyse_crop(lum, StrokeConfig(), text_height=(y1 - y0) + 24)
+    read = analyse_crop(lum, StrokeConfig(), text_height=(y1 - y0) + 24, rgb=crop / 255.0)
+    assert plain is not None and read is not None
+    if plain.level < _TOO_FAINT_TO_REREAD:
+        assert read.level == pytest.approx(plain.level), \
+            f"a faint reading of {plain.level:.2f} was lifted to {read.level:.2f}"
+
+
 def test_compose_alpha_merges_patches_with_max():
     from dsf.refine.strokes import AlphaPatch
 

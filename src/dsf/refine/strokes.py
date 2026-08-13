@@ -277,8 +277,72 @@ def _decide_polarity(lum: np.ndarray, white: np.ndarray, black: np.ndarray,
     return "light" if w_spread <= b_spread else "dark"
 
 
+#: A luma level this close to solid has nothing left to recover, so the colour pass is not
+#: run at all. White text - which is most text - lands here, so the common case pays nothing.
+_OPAQUE_ENOUGH = 0.95
+
+#: And below this the colour pass is not run either, because it may refine a reading but it
+#: must not rescue one. The same 0.5 the rest of the pipeline uses to call a pixel text at
+#: all, so what it will adjust is exactly what is already being masked.
+#:
+#: The demo clip is why. It carries a cyan shop sign the camera photographed, which is meant
+#: to keep its real depth, and the appearance gate lets it through - it was only ever
+#: harmless because its luma reading of 0.38 put it under the threshold at which a mask does
+#: anything. Reading it in colour lifts it to 0.62 and it lands in the mask as a slab: the
+#: correction is not wrong about the sign, which really is an opaque colour, but a filmed
+#: sign scoring higher is worth nothing here and being masked is the one failure this tool
+#: advertises avoiding. That the gate lets it through at all is a separate bug this uncovered.
+#:
+#: The cost is a step, not a slope: a *coloured* credit part-way through a fade crosses this
+#: line and its mask jumps. Fades are quick and the temporal filter spans them, and the
+#: alternative was every solid coloured credit stamped at three quarters for ever.
+_TOO_FAINT_TO_REREAD = 0.5
+
+
+def _opacity_in_colour(rgb: np.ndarray | None, k: int, core: np.ndarray, polarity: str,
+                       cfg: StrokeConfig) -> float | None:
+    """How opaque the text is, asked of each colour channel and answered by the loudest.
+
+    The opacity model divides the residual by the contrast between the text and the
+    background it covers, and it takes the text's colour as pure white for light text or
+    pure black for dark. That is exactly right for a subtitle and wrong for everything else:
+    an amber credit at luma 0.77 over a shot at 0.15 divides by 0.85 where it should divide
+    by 0.62, so a fully opaque credit reports 0.76 and a quarter of the corruption it was
+    meant to bury shows back through it. Measured on a real credit, which read 0.76 against
+    a predicted 0.73.
+
+    Asking each channel separately fixes it without giving up what the luma model was
+    protecting. A bright saturated colour is bright because some channel is at or near its
+    maximum - amber is (255, 190, 80), so in red it *is* white - and that channel's reading
+    is the honest one. Taking the loudest is therefore reading the opacity off whichever
+    channel the white reference happens to be true for.
+
+    Crucially it does nothing to a fade. White text answers identically in all three
+    channels, so the maximum is the luma answer; a white credit at 45% reports 45% in red,
+    green and blue alike. And a *coloured* credit mid-fade is handled correctly too: amber at
+    half strength puts its red channel half way from the background to full, which is 0.5.
+    What it cannot do is separate opaque mid-grey text from half-strength white, because
+    nothing can - they are the same pixels.
+    """
+    if rgb is None:
+        return None
+    light = polarity == "light"
+    reference = 1.0 if light else 0.0
+    best = 0.0
+    for channel in range(rgb.shape[2]):
+        plane = rgb[..., channel]
+        base = estimate_background(plane, k)
+        residual = plane - base if light else base - plane
+        contrast = np.maximum(np.abs(reference - base), cfg.min_response)
+        answer = np.clip(residual / contrast, 0.0, 1.0)[core]
+        if answer.size:
+            best = max(best, float(np.percentile(answer, 90)))
+    return min(best, 1.0)
+
+
 def analyse_crop(lum: np.ndarray, cfg: StrokeConfig,
-                 text_height: float | None = None) -> CropStats | None:
+                 text_height: float | None = None,
+                 rgb: np.ndarray | None = None) -> CropStats | None:
     """Turn a luma crop into a soft glyph alpha, independent of the background behind it.
 
     A global luma split cannot survive real footage: as soon as a detection box straddles a
@@ -339,6 +403,15 @@ def analyse_crop(lum: np.ndarray, cfg: StrokeConfig,
     shape = np.clip(alpha / level, 0.0, 1.0).astype(np.float32)
     if not np.any(shape > 0.5):
         return None
+
+    # The shape is normalised by the luma reading above, which is the right divisor for it;
+    # what it gets scaled back by is asked again in colour, because luma alone systematically
+    # under-reads any text that is not white. Skipped once the luma answer is already solid,
+    # which is where white text lands, so the common case pays nothing for this.
+    if _TOO_FAINT_TO_REREAD <= level < _OPAQUE_ENOUGH:
+        strength = _opacity_in_colour(rgb, k, core, polarity, cfg)
+        if strength is not None:
+            level = max(level, strength)
 
     # Only treat the opposite sign as an outline when it is a real response. On text drawn
     # without a rim that channel is just noise, and growing into it would fur every glyph.
@@ -490,7 +563,7 @@ def extract_patch(frame: np.ndarray, det: Detection, cfg: StrokeConfig,
     crop = frame[y0:y1, x0:x1].astype(np.float32)
     lum = (0.2126 * crop[..., 0] + 0.7152 * crop[..., 1] + 0.0722 * crop[..., 2]) / 255.0
 
-    stats = analyse_crop(lum, cfg, text_height=det.height)
+    stats = analyse_crop(lum, cfg, text_height=det.height, rgb=crop / 255.0)
     if stats is None:
         return None
 

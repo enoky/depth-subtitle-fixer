@@ -304,6 +304,16 @@ tall a region had to be on that clip to be looked at at all.
    from the glyph core into its outline (`--rim-expand`), since the outline is part of the
    overlay and its depth is corrupted too.
 
+   `T` is taken as pure white for light text, which is right for a subtitle and wrong for
+   everything else - an amber credit at luma 0.77 over a shot at 0.15 divides by 0.85 where
+   0.62 was wanted, so a fully opaque credit reports 0.76 and a quarter of the corruption it
+   was meant to bury shows back through the letters. So the strength is read once per colour
+   channel and the loudest kept: a bright saturated colour is bright because some channel is
+   at its maximum, and amber is (255, 190, 80), so in red it *is* white. White text answers
+   the same in all three channels, so a fade is untouched by this. It will not lift a
+   reading that is under half showing, because a filmed shop sign is an opaque colour too
+   and scoring it correctly is worth nothing when it must keep its real depth.
+
    Two failures this avoids. Thresholding raw luminance does not survive a detection box
    that straddles a lighting boundary - the threshold ends up describing the *background*
    rather than separating text from it, and whichever word sits over the brighter half is
