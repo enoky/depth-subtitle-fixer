@@ -82,7 +82,21 @@ def build_demo():
         ImageDraw.Draw(m).text(((W - tw) // 2, int(H * 0.86)), text, font=sub_font,
                                fill=255, stroke_width=3, stroke_fill=255)
         m = np.array(m).astype(np.float32) / 255.
-        halo = np.clip(cv2.GaussianBlur(m, (0, 0), 11) * 1.6, 0, 1)
+        # The smear DepthCrafter actually leaves: a slab a couple of pixels proud of the
+        # glyphs with a short falloff, not a long Gaussian tail. Measured on a real pair by
+        # profiling depth against distance from the letters, with frames of the same shot
+        # before the credit appeared as a control for the scene's own structure. It runs
+        # +220 codes over the glyphs, +38 at three pixels and +12 at four, then flattens.
+        #
+        # Four pixels there is eight here. That map came back at 960x384 for a 1920x800 clip,
+        # and this one is written at full resolution, so the same physical smear spans twice
+        # as many pixels of it. Eight source pixels is the number both agree on.
+        #
+        # It used to be a sigma-11 blur, still +68 out at eleven pixels of a full-resolution
+        # map - three to five times too wide in any units - which is why `--heal-dilate 6`
+        # appeared hopeless here while covering the real pair with room to spare.
+        halo = cv2.dilate(m, cv2.getStructuringElement(cv2.MORPH_ELLIPSE, (7, 7)))
+        halo = np.clip(cv2.GaussianBlur(halo, (0, 0), 1.5), 0, 1)
         depth = depth * (1 - halo) + 935 * halo   # smear + wrong depth
         depth_frames.append(np.clip(depth, 64, 940).astype(np.uint16))
 

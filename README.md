@@ -292,6 +292,12 @@ tall a region had to be on that clip to be looked at at all.
   than the corruption it is replacing*. On a credit across a subject's shoulder the text
   stood 240 codes proud of its surroundings untouched, 243 after an absolute repair, and 80
   after a relative one
+- `--heal-dilate N` - how far past the strokes to repair, **in pixels of the depth map**.
+  DepthCrafter's smear was measured at roughly 8 source pixels past the glyphs - +220 codes
+  over them, +38 at three pixels, +12 at four, then flat - so the default 6 covers it on a
+  half-resolution depth map and wants raising towards 12 on a full-resolution one. Worth
+  checking against your own pair, since the width plausibly moves with how much the model
+  downsampled
 - `--heal edt|none` and `--heal-scope glyph|region` - repair the smear around the strokes
   (default) or flatten the whole detection box
 - `--dilate N` / `--feather S` - grow and soften the mask edge

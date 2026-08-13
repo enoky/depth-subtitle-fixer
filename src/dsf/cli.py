@@ -152,7 +152,11 @@ def add_composite_args(p: argparse.ArgumentParser) -> None:
                    help="repair the corrupted depth around the glyphs before painting")
     g.add_argument("--heal-scope", choices=("glyph", "region"),
                    help="glyph: a halo around the strokes. region: the whole detection box")
-    g.add_argument("--heal-dilate", type=int, help="halo radius in px for --heal-scope glyph")
+    g.add_argument("--heal-dilate", type=int,
+                   help="halo radius for --heal-scope glyph, in pixels of the DEPTH map "
+                        "(default 6). DepthCrafter's smear runs about 8 source pixels past "
+                        "the glyphs, so 6 covers it on a half-resolution map and wants "
+                        "raising towards 12 on a full-resolution one")
     g.add_argument("--range", choices=("auto", "tv", "pc"),
                    help="luma code range of the depth map (auto reads the stream tags)")
 
