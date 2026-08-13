@@ -64,6 +64,14 @@ That writes `samples/demo_rgb.mp4` (1080p, burned-in subtitles plus two in-scene
 must keep their real depth) and `samples/demo_depth.mp4` (a plausible 10-bit depth map with
 the depth wrecked and smeared over the subtitles).
 
+The signs are photographed rather than pasted on - skewed off-axis, softened by the lens,
+taking the scene's own light - because that is the only version of them worth shipping. Drawn
+flat, as they were until recently, they are burned-in overlays in everything but colour, with
+a chroma variance of exactly zero that nothing photographed has, and the clip cannot show
+what it claims to: the appearance gate is asked to separate two things that are identical.
+Painted properly they score 0.099 of contrast against the 0.12 floor and are turned away,
+which is the behaviour the demo is there to demonstrate.
+
 Add `--scan-demo` for a small folder of clips to point the scanner (below) at:
 `samples/scan_demo/rgb` holds one subtitled clip, one with scrolling credits and one
 carrying nothing but signage the camera photographed, with matching `_depth` maps alongside.

@@ -49,17 +49,24 @@ def build_demo():
     SUBS = ["I never asked for this.", "You should have come sooner."]
     rgb_frames, depth_frames = [], []
     sub_font = load_font(52)
-    sign_font = load_font(44)
 
     for i in range(N):
         shift = i * 3
         scene = np.roll(base, shift, axis=1)
         tint = np.stack([scene * 180 + 40, scene * 160 + 45, scene * 140 + 55], -1)
-        img = Image.fromarray(np.clip(tint, 0, 255).astype(np.uint8))
+        frame = np.clip(tint, 0, 255).astype(np.uint8)
+        # In-scene signage, photographed rather than pasted on: skewed off-axis, softened by
+        # the lens, taking the scene's own light. These two are the whole point of the clip -
+        # they must come out of a render with their real depth - so they have to be the thing
+        # they are standing in for. Drawn flat, as they were, they were burned-in overlays in
+        # everything but colour: a chroma variance of exactly zero, which nothing photographed
+        # has, and the appearance gate was being asked to separate two identical things.
+        frame = photographed_sign(frame, "MOTEL", (260, 300), size=44,
+                                  tint=(210, 120, 60), alpha=0.75)
+        frame = photographed_sign(frame, "OPEN 24H", (1330, 380), size=44,
+                                  tint=(90, 180, 200), alpha=0.75)
+        img = Image.fromarray(frame)
         d = ImageDraw.Draw(img)
-        # in-scene signage: perspective-ish text up in the frame, lower contrast, coloured
-        d.text((260, 300), "MOTEL", font=sign_font, fill=(210, 120, 60))
-        d.text((1330, 380), "OPEN 24H", font=sign_font, fill=(90, 180, 200))
         # burned-in subtitle: white, black outline, bottom centre
         text = SUBS[(i // 24) % len(SUBS)]
         bb = d.textbbox((0, 0), text, font=sub_font, stroke_width=3)

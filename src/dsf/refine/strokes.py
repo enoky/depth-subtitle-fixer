@@ -285,13 +285,17 @@ _OPAQUE_ENOUGH = 0.95
 #: must not rescue one. The same 0.5 the rest of the pipeline uses to call a pixel text at
 #: all, so what it will adjust is exactly what is already being masked.
 #:
-#: The demo clip is why. It carries a cyan shop sign the camera photographed, which is meant
-#: to keep its real depth, and the appearance gate lets it through - it was only ever
-#: harmless because its luma reading of 0.38 put it under the threshold at which a mask does
-#: anything. Reading it in colour lifts it to 0.62 and it lands in the mask as a slab: the
-#: correction is not wrong about the sign, which really is an opaque colour, but a filmed
-#: sign scoring higher is worth nothing here and being masked is the one failure this tool
-#: advertises avoiding. That the gate lets it through at all is a separate bug this uncovered.
+#: A filmed shop sign is an opaque colour too, so the colour pass is right about it, and
+#: being right about it is worth nothing when it has to keep its real depth. The demo clip
+#: used to carry one that read 0.38 in luma - under the threshold at which a mask does
+#: anything - and 0.62 in colour, which put a slab over scenery.
+#:
+#: That sign turned out to be drawn flat rather than photographed, which is a fixture bug
+#: since fixed: painted the way a camera finds one, it scores 0.099 of contrast against a
+#: 0.12 floor and the appearance gate throws it out well before this. So nothing now depends
+#: on this floor to keep signage out of the mask. It stays because the principle stands on
+#: its own - there is no reading of something that faint worth acting on, whatever produced
+#: it - and because the next clip's scenery will not be synthetic.
 #:
 #: The cost is a step, not a slope: a *coloured* credit part-way through a fade crosses this
 #: line and its mask jumps. Fades are quick and the temporal filter spans them, and the
