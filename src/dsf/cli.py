@@ -59,6 +59,7 @@ ARG_MAP: list[tuple[str, str, str]] = [
     ("heal", "composite", "heal"),
     ("heal_scope", "composite", "heal_scope"),
     ("heal_dilate", "composite", "heal_dilate"),
+    ("heal_strokes", "composite", "heal_strokes"),
     ("range", "composite", "value_range"),
     ("encoder", "encode", "encoder"),
     ("crf", "encode", "crf"),
@@ -119,7 +120,7 @@ def add_detect_args(p: argparse.ArgumentParser) -> None:
     g.add_argument("--depth-tol", type=float,
                    help="floor under how far one glyph's depth may sit from the depth the "
                         "whole line reads at, as a fraction of the code range (default "
-                        "0.10; the real bar also scales with how much the line's own "
+                        "0.15; the real bar also scales with how much the line's own "
                         "letters disagree). This is what stops an object behind the text "
                         "that happens to match its brightness being masked along with the "
                         "glyphs; needs --depth to be supplied, and 0 disables it")
@@ -153,10 +154,17 @@ def add_composite_args(p: argparse.ArgumentParser) -> None:
     g.add_argument("--heal-scope", choices=("glyph", "region"),
                    help="glyph: a halo around the strokes. region: the whole detection box")
     g.add_argument("--heal-dilate", type=int,
-                   help="halo radius for --heal-scope glyph, in pixels of the DEPTH map "
-                        "(default 6). DepthCrafter's smear runs about 8 source pixels past "
-                        "the glyphs, so 6 covers it on a half-resolution map and wants "
-                        "raising towards 12 on a full-resolution one")
+                   help="floor for the healed halo's radius, in pixels of the DEPTH map "
+                        "(default 6). The radius used is normally set by the strokes "
+                        "themselves - see --heal-strokes - and this only takes over when it "
+                        "asks for more")
+    g.add_argument("--heal-strokes", type=float,
+                   help="healed halo radius as a multiple of the mask's stroke width "
+                        "(default 1.5). The smear scales with the text and with the depth "
+                        "map's resolution, so this is what actually sets the radius. It is "
+                        "set where healing stops taking real depth with it rather than "
+                        "where it clears the most smear; raise it if a ring of bad depth "
+                        "is visibly surviving around the glyphs")
     g.add_argument("--range", choices=("auto", "tv", "pc"),
                    help="luma code range of the depth map (auto reads the stream tags)")
 

@@ -292,12 +292,15 @@ tall a region had to be on that clip to be looked at at all.
   than the corruption it is replacing*. On a credit across a subject's shoulder the text
   stood 240 codes proud of its surroundings untouched, 243 after an absolute repair, and 80
   after a relative one
-- `--heal-dilate N` - how far past the strokes to repair, **in pixels of the depth map**.
-  DepthCrafter's smear was measured at roughly 8 source pixels past the glyphs - +220 codes
-  over them, +38 at three pixels, +12 at four, then flat - so the default 6 covers it on a
-  half-resolution depth map and wants raising towards 12 on a full-resolution one. Worth
-  checking against your own pair, since the width plausibly moves with how much the model
-  downsampled
+- `--heal-strokes N` - how far past the strokes to repair, as a multiple of the mask's own
+  stroke width (default 1.5), with `--heal-dilate` as a floor in depth-map pixels. The smear
+  scales with the text and with how far the depth map was downsampled, so a fixed radius is
+  wrong twice over: the same clip at half and at full depth resolution needs two different
+  numbers, and so do a subtitle and a title card in one frame. Measured on a credit, a fixed
+  6 changed nothing at all past two pixels while the smear ran out to thirteen. Set where
+  healing stops taking real depth with it rather than where it clears the most smear -
+  healing wide replaces scene structure with an interpolation from further out, which cannot
+  be undone - so raise it when a ring of bad depth is visibly surviving
 - `--heal edt|none` and `--heal-scope glyph|region` - repair the smear around the strokes
   (default) or flatten the whole detection box
 - `--dilate N` / `--feather S` - grow and soften the mask edge

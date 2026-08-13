@@ -109,6 +109,46 @@ def test_heal_removes_the_smear_around_the_glyphs():
     assert int(out[39, 40]) == pytest.approx(502, abs=2), "glyph painted at 0.5 brightness"
 
 
+def test_the_healed_radius_follows_the_stroke_width():
+    """A fixed radius means two different things at two depth-map resolutions.
+
+    DepthCrafter's smear scales with what it is smearing, so the same clip delivered at half
+    resolution and at full needs two different radii in pixels - and so do a subtitle and a
+    title card in the same frame. Measuring it off the mask's own strokes covers both without
+    the caller having to know either.
+    """
+    from dsf.composite import heal_radius
+
+    cfg = CompositeConfig(heal_dilate=0, heal_strokes=1.5)
+    thin, thick = np.zeros((80, 80), bool), np.zeros((80, 80), bool)
+    thin[38:42, 20:60] = True     # a 4px stroke
+    thick[32:48, 20:60] = True    # the same text at 4x the size
+    assert heal_radius(thick, cfg) > heal_radius(thin, cfg) * 2, \
+        "a heavier stroke smears further and must be healed further out"
+    # The configured value is a floor, for text too small for its strokes to ask for enough.
+    assert heal_radius(thin, CompositeConfig(heal_dilate=30, heal_strokes=1.5)) == 30
+
+
+def test_a_wider_smear_needs_no_bigger_setting():
+    """The point of scaling: the same config clears a smear that scales with the text."""
+    out = []
+    for scale in (1, 3):
+        n = 80 * scale
+        depth = np.full((n, n), 300, dtype=np.uint16)
+        alpha = np.zeros((n, n), dtype=np.float32)
+        alpha[38 * scale:42 * scale, 30 * scale:50 * scale] = 1.0
+        depth[34 * scale:46 * scale, 26 * scale:54 * scale] = 900   # smear scales with it
+        cfg = CompositeConfig(brightness=0.5, heal="edt", heal_scope="glyph",
+                              heal_dilate=0, dilate=0, feather=0.0)
+        composited = composite_frame(depth, alpha, cfg, 10, "tv")
+        halo = np.zeros((n, n), dtype=bool)
+        halo[34 * scale:46 * scale, 26 * scale:54 * scale] = True
+        halo[38 * scale:42 * scale, 30 * scale:50 * scale] = False
+        out.append(int(composited[halo].max()))
+    assert all(v < 500 for v in out), \
+        f"the smear survived at one of the two sizes: {out} (a fixed radius does exactly this)"
+
+
 def _heal_whole_frame(depth, mask, smooth=0.0):
     """What the heal computes with no window at all - the reference the crop must match."""
     import cv2

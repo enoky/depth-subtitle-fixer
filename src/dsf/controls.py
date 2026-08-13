@@ -139,8 +139,13 @@ KNOBS: list[Knob] = [
     _k("heal", "composite", "heal", "repair", "Heal", "radio", choices=["edt", "none"]),
     _k("heal_scope", "composite", "heal_scope", "repair", "Heal scope", "radio",
        choices=["glyph", "region"]),
-    _k("heal_dilate", "composite", "heal_dilate", "repair", "Heal halo (px)", "slider",
-       minimum=0, maximum=40, step=1),
+    _k("heal_strokes", "composite", "heal_strokes", "repair", "Heal halo (x stroke width)",
+       "slider", minimum=0.0, maximum=6.0, step=0.1,
+       info="what normally sets the healed radius; raise it if bad depth survives in a ring "
+            "around the glyphs"),
+    _k("heal_dilate", "composite", "heal_dilate", "repair", "Heal halo floor (px)", "slider",
+       minimum=0, maximum=40, step=1,
+       info="only takes over when it asks for more than the strokes imply"),
     _k("value_range", "composite", "value_range", "repair", "Luma code range", "radio",
        choices=["auto", "tv", "pc"]),
 

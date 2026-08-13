@@ -96,6 +96,28 @@ def heal_edt(depth: np.ndarray, mask: np.ndarray, smooth: float = 2.0) -> np.nda
     return out
 
 
+def heal_radius(text: np.ndarray, cfg: CompositeConfig) -> int:
+    """How far past the strokes to repair, measured off the strokes themselves.
+
+    DepthCrafter's smear is not a fixed number of pixels; it scales with the thing being
+    smeared. So a constant radius is wrong twice over - it means one thing on a depth map
+    that came back at half the clip's resolution and another at full, and one thing on a
+    subtitle and another on a title card. Measured on a credit whose mask strokes ran 8.2 px
+    of a 960x384 map, the corruption was still 10 codes out at thirteen pixels while the
+    configured 6 cleared nothing beyond two.
+
+    Twice the peak of the distance transform is the stroke thickness, the same measure the
+    extractor filters components on - written out here rather than imported, because the
+    compositor otherwise knows nothing about glyph extraction and this is two lines of it.
+    The configured value stays as a floor, so setting it high still wins on a clip that wants
+    more than the strokes imply.
+    """
+    if not text.any():
+        return max(0, int(cfg.heal_dilate))
+    stroke = 2.0 * float(cv2.distanceTransform(text.astype(np.uint8), cv2.DIST_L2, 3).max())
+    return max(int(cfg.heal_dilate), int(round(float(cfg.heal_strokes) * stroke)))
+
+
 def region_mask(mask: np.ndarray) -> np.ndarray:
     """Bounding-box fill of each connected component - the aggressive heal scope."""
     out = np.zeros_like(mask, dtype=bool)
@@ -155,7 +177,8 @@ def composite_frame(depth_y: np.ndarray, alpha: np.ndarray, cfg: CompositeConfig
         if cfg.heal_scope == "region":
             heal_area = region_mask(text)
         elif cfg.heal_scope == "glyph":
-            heal_area = cv2.dilate(text.astype(np.uint8), _ellipse(cfg.heal_dilate)).astype(bool)
+            heal_area = cv2.dilate(text.astype(np.uint8),
+                                   _ellipse(heal_radius(text, cfg))).astype(bool)
         else:
             raise ValueError(f"unknown heal_scope {cfg.heal_scope!r}; use glyph or region")
         if cfg.heal == "edt":

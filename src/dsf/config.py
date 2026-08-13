@@ -204,7 +204,23 @@ class CompositeConfig:
     feather: float = 1.5
     heal: str = "edt"  # edt | none
     heal_scope: str = "glyph"  # glyph | region
+    #: Floor for the healed halo's radius, in pixels *of the depth map*.
     heal_dilate: int = 6
+    #: ...and as a multiple of the mask's own stroke width, which is what actually decides
+    #: how far the smear reaches. A fixed radius cannot work here for the same reason a fixed
+    #: stroke cap could not: it means one thing on a depth map that came back at half the
+    #: clip's resolution and another at full, one thing on a subtitle and another on a title
+    #: card. On a credit over a 960x384 map the smear ran 28 codes out at two to four pixels
+    #: and 10 at nine to thirteen, and the fixed 6 cleared none of it - it changed nothing at
+    #: all past two pixels. This puts the radius at 17 there and 11 on a 1920x1080 map.
+    #:
+    #: Set where it stops taking real depth with it, not where it clears the most smear. The
+    #: residual either way is small - 11 codes of about 880 - while healing wide replaces
+    #: scene structure with an interpolation from further out, and that cannot be undone. On
+    #: the clip with real structure around its text, 1.5 leaves 11 codes at two to four
+    #: pixels and over-corrects by 2 at the far edge; 1.8 leaves 6 but over-corrects by 10,
+    #: and 2.5 by 17. Raise it when a ring of bad depth is visibly surviving.
+    heal_strokes: float = 1.5
     heal_smooth: float = 2.0
     value_range: str = "auto"  # auto | tv | pc
 
