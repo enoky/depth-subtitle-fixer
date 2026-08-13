@@ -141,14 +141,17 @@ class StrokeConfig:
     #: blobs share, as a fraction of the depth map's legal code range - the real bar also
     #: scales with how much the blobs disagree among themselves. This is the strong one:
     #: burned-in text is pasted onto one flat slab of wrong depth, which is the whole reason
-    #: this tool exists, and an object genuinely behind it is not on that slab. Set from
-    #: measurement rather than taste, on a clip with no intruders in it at all, so that
-    #: anything the veto takes there is a false positive by construction: across its 303
-    #: boxes a 0.06 floor cost a blob from 19% of them and 0.10 costs none. Turning it down
-    #: below the default trades that safety for reach, and is the knob to reach for when
-    #: something behind the text is surviving. Does nothing unless a depth map is handed to
-    #: the extractor; 0 disables it.
-    depth_tol: float = 0.10
+    #: this tool exists, and an object genuinely behind it is not on that slab. Set against
+    #: two clips with the glyphs labelled, so that every pixel taken is known to be text or
+    #: not: on a credit carrying a lens flare and a strand of hair inside its box, 0.15 takes
+    #: 2725 px of background and no glyph at all, while 0.10 takes 3950 of background but
+    #: bites 1612 out of the letters and 0.06 removes twice as much text as background. It is
+    #: set at the point where the text stops being touched rather than where the most
+    #: background is caught, because a missed intruder leaves a small wrong patch in the
+    #: depth while an eaten letter shows the corruption through the writing - which is the
+    #: artefact this tool exists to remove. Does nothing unless a depth map is handed to the
+    #: extractor; 0 disables it.
+    depth_tol: float = 0.15
     #: The same test on normalised chroma. Weaker - the hard cases are the ones where the
     #: background object matches the text's hue as well as its luma - but it costs nothing
     #: and needs no depth map. 0 disables it.

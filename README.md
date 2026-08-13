@@ -347,19 +347,19 @@ tall a region had to be on that clip to be looked at at all.
    there the letters take the depth of the wall behind them, and a wall receding across the
    shot would otherwise cost the far end of every line.
 
-   The defaults are set by measuring on a clip with no intruders in it at all, so anything
-   the veto takes there is a false positive by construction: across its 303 boxes a 0.06
-   tolerance costs a blob from 19% of them and the shipped 0.10 costs none. Turn
-   `--depth-tol` down from there when something behind the text is surviving, and up when
-   letters are being eaten.
+   `--depth-tol` is set against clips with the glyphs labelled, so every pixel it takes is
+   known to be text or not. On a credit with a lens flare and a strand of hair inside its
+   box, the shipped 0.15 removes 2725 px of background and touches no glyph; 0.10 catches
+   more background (3950) but bites 1612 px out of the letters, and 0.06 removes twice as
+   much text as background. It sits where the text stops being touched rather than where the
+   most background is caught: a missed intruder leaves a small wrong patch in the depth,
+   while an eaten letter shows the corruption through the writing, which is the artefact
+   this tool exists to remove. Turn it down if something behind the text is surviving, and
+   check a preview when you do.
 
-   How much it can do for you depends on how cleanly DepthCrafter answered. On a 1080p clip
-   whose depth came back at 960x384 and heavily blurred, individual letters do not hold
-   distinct depths reliably, and about half of what the veto removed at the default was
-   glyph rather than background - worth having for the lens flare and the strand of hair it
-   took out of the mask, but check a preview rather than assuming. The colour test is the
-   weaker of the two by construction - the hard cases are the ones where the object matches
-   the text's hue as well as its brightness - but it needs no depth map.
+   The colour test is the weaker of the two by construction - the hard cases are the ones
+   where the object matches the text's hue as well as its brightness - but it needs no depth
+   map.
 4. **Smooth** - a temporal median (or max, for credits) across a small window kills detector
    flicker. It is applied to the stroke *shape* only, and each frame is then scaled by the
    opacity it measured for itself. Smoothing the finished mask instead would drag a fading
