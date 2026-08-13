@@ -151,7 +151,12 @@ def test_the_full_stop_ending_a_subtitle_survives():
     assert stop.sum() > 20, "test setup: the full stop was not isolated"
 
     box = (50, 110, xs.max() + 12, ys.max() + 12)
-    guide = _slab_guide(cover, scale=0.25, sigma=4.0)  # a quarter-resolution depth map
+    # A low-resolution, heavily blurred map with a deep slab under the text - which is what
+    # it takes to drag a small mark's reading far enough off the line to be rejected. The
+    # first version of this used a milder guide and stopped being a test of anything: the
+    # polarity fix and a wider tolerance made the mark safe on their own, so it passed with
+    # the size guard removed.
+    guide = _slab_guide(cover, text_depth=0.85, scene_depth=0.25, scale=0.18, sigma=6.0)
     patch = _extract(frame, box, depth=guide)
     assert patch is not None
     assert _covered(patch, stop) > 0.8, "the full stop was vetoed off the end of the line"

@@ -390,6 +390,15 @@ _SCATTER_K = 3.0
 #: twentieth the area of the letters it measured a depth of its own that no letter shared,
 #: and was thrown out of every line that ended in one. Small *intruders* escaping with it is
 #: the accepted cost, and they are what `min_cc_area` and the temporal prior are already for.
+#:
+#: The half is measured, against clips with the glyphs labelled. Removing the guard entirely
+#: costs 399 px of letters on a credit and 1125 px on a clip with nothing in it to reject at
+#: all - every one of those a false positive by construction. A quarter still costs 481. At
+#: a half nothing text is touched on either, and raising it further only gives up background:
+#: 2076 px caught at 0.8 against 2725 here. So this is the smallest value that leaves the
+#: writing alone, which is the side to err on. The test that covers it pins the guard's
+#: existence rather than its exact value - a synthetic mark is either resolvable or it is
+#: not, while where to put the line between the two is a question only real footage answers.
 _MIN_JUDGED_AREA_FRAC = 0.5
 
 
