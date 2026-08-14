@@ -132,6 +132,22 @@ class StrokeConfig:
     #: shadow that title cards usually carry leaves a speckled crust on every glyph.
     rim_expand: int = 0
 
+    #: Also read the strokes out of the depth map and union them with the ones read out of
+    #: the picture. The two fail in different places: luma cannot separate text from a
+    #: background the same brightness, which is most of what goes wrong on a credit over a
+    #: warm interior, and depth does not care what colour anything is. On such a credit, with
+    #: the glyphs labelled, it takes recall from 52.9% to 55.5%.
+    #:
+    #: Off by default because what the depth map holds is not the writing, it is the slab
+    #: laid over the writing - the glyphs plus their halo, and on tightly set text several
+    #: letters run together. How much that overstates them depends entirely on how the map
+    #: was produced. On a half-resolution one it is blurred back to about the right size and
+    #: the union is a clear win; on a full-resolution one the slab reads sharply three pixels
+    #: proud of every stroke and the mask grew by half again, which paints the text fatter
+    #: than it is. Worth turning on for a clip whose credits sit over their own colour, and
+    #: worth checking a preview when you do. Does nothing unless a depth map is supplied.
+    depth_strokes: bool = False
+
     # The two agreement vetoes. The residual is measured on luma alone, so an object behind
     # the text that happens to match its brightness answers exactly as a glyph does and lands
     # in the mask with them. Neither of these looks for text; they ask whether each blob is

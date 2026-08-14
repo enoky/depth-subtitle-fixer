@@ -258,6 +258,68 @@ def test_neither_veto_fires_on_a_crop_with_too_few_blobs():
     assert len(_keep_agreeing(blobs, values, 0.05, 0.6, strength)) == 2
 
 
+# ------------------------------------------------------ reading the strokes out of the depth
+
+def _text_the_colour_of_its_background():
+    """A credit the same brightness as what it sits on - invisible to a luma residual."""
+    from PIL import Image, ImageDraw
+
+    # A warm interior that sweeps *through* the credit's own colour part of the way across,
+    # which is what makes this hard. Flat text on a flat wall is recovered whole however
+    # close the two are; what defeats a residual is a background that matches the writing
+    # over part of the line and not the rest, so the same glyphs are plain in one place and
+    # invisible a few letters later.
+    ramp = np.linspace(60, 240, W, dtype=np.float32)[None, :]
+    scene = np.stack([ramp * 1.00, ramp * 0.64, ramp * 0.27], -1).repeat(H, 0)
+    img = Image.fromarray(np.clip(scene, 0, 255).astype(np.uint8))
+    font = load_font(52)
+    # Not closer than this: the union needs the picture to have found *something*, because
+    # the depth map says where the writing is and not how strongly it is showing, and there
+    # is no honest opacity to stamp without that.
+    ImageDraw.Draw(img).text((90, 130), "executive producer", font=font, fill=(196, 130, 60))
+    cover = Image.new("L", (W, H), 0)
+    ImageDraw.Draw(cover).text((90, 130), "executive producer", font=font, fill=255)
+    return np.array(img), np.array(cover)
+
+
+def test_the_depth_map_finds_text_the_picture_hides():
+    """The case the whole thing is for: text within a hair's breadth of its background.
+
+    A luma residual has nothing to work with here - the credit is two code values off the
+    wall behind it - while DepthCrafter has pasted it onto a slab and the depth map shows it
+    plainly. Off by default, because what the map holds is the slab rather than the writing.
+    """
+    frame, cover = _text_the_colour_of_its_background()
+    guide = _slab_guide(cover, text_depth=0.80, scene_depth=0.35)
+    ys, xs = np.nonzero(cover > 200)
+    box = (xs.min() - 8, ys.min() - 8, xs.max() + 8, ys.max() + 8)
+
+    blind = _extract(frame, box, StrokeConfig(depth_strokes=False), depth=guide)
+    seeing = _extract(frame, box, StrokeConfig(depth_strokes=True), depth=guide)
+    assert seeing is not None, "the depth map should have found the credit"
+
+    # Judged on the stroke shape. A credit this close to its background is dim in luma terms
+    # whatever else is true of it, so the opacity it gets stamped at is a separate question
+    # from whether its letters were found at all - which is what this is about.
+    def shape_of(patch):
+        return 0.0 if patch is None else float(
+            (compose_alpha([patch], H, W, normalised=True)[cover > 200] > 0.5).mean())
+
+    found, missed = shape_of(seeing), shape_of(blind)
+    assert found > missed + 0.05, \
+        f"reading the depth recovered {found:.0%} against {missed:.0%} from the picture alone"
+    assert missed < 0.90, "the fixture is not hard enough for the picture to be struggling"
+
+
+# The other half of this - that the depth map may complete a stroke the picture partly saw
+# but never invent one on its own say-so - is not covered here. It is real and measured: the
+# depth shape comes back 1.48x the luma one on a sharp map with 81% of it outside any stroke,
+# and restricting it to a stroke's reach of something the picture found took the mask's growth
+# on that clip from +94% to +49%. But every synthetic case built for it was thrown out first
+# by the component filter, which rejects invented shapes for its own reasons, so no test here
+# fails when the restriction is removed. See `_read_depth_strokes`.
+
+
 # ----------------------------------------------------------------------------- the guide
 
 def test_the_guide_normalises_over_the_legal_code_range():

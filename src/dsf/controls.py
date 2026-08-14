@@ -101,6 +101,11 @@ KNOBS: list[Knob] = [
        info="only for hard drawn outlines; on shadowed text it speckles the glyphs"),
     _k("luma_tol", "strokes", "luma_tol", "strokes_adv", "Outline colour tolerance", "slider",
        minimum=0.02, maximum=0.60, step=0.01),
+    _k("depth_strokes", "strokes", "depth_strokes", "strokes_adv", "Read strokes from depth",
+       "checkbox",
+       info="union the glyphs the depth map sees with the ones the picture shows - finds "
+            "text the same colour as what it sits on, but can paint it fatter; check a "
+            "preview"),
     _k("depth_tol", "strokes", "depth_tol", "strokes_adv", "Depth agreement tolerance",
        "slider", minimum=0.0, maximum=0.50, step=0.01,
        info="stops an object behind the text that matches its brightness being masked "

@@ -547,6 +547,46 @@ def _keep_agreeing(blobs: list[np.ndarray], values: np.ndarray | None, tol: floa
     return [blob for i, blob in enumerate(blobs) if i not in rejected]
 
 
+def _read_depth_strokes(guide: np.ndarray | None, cfg: StrokeConfig, text_height: float,
+                        near: np.ndarray | None = None) -> np.ndarray | None:
+    """The stroke shape as the *depth map* sees it, or None if it has nothing to say.
+
+    The same background-median residual the picture goes through, pointed at the depth map
+    instead. That works without changing a line of it because the argument never mentioned
+    colour: the writing is a thin thing laid over a scene that varies more slowly than it
+    does, and DepthCrafter's slab over the glyphs is exactly as thin and exactly as laid on.
+
+    It is worth having because it fails in a different place. Luma cannot separate text from
+    a background the same brightness, which is most of what goes wrong on a credit over a
+    warm interior; depth does not care what colour anything is. Measured on such a credit,
+    against labelled glyphs: luma alone recovers 50.2% of the letters and drags in 118 px of
+    background, the depth channel alone recovers 34.3% and drags in *none*, and the union of
+    the two recovers 53.3%. So it finds writing the picture hides, and the reason to union
+    rather than replace is that it only ever sees text the depth model reacted to at all.
+
+    Blending the depth into the RGB and running the ordinary extractor over that is the
+    obvious way to do this and it measures worse - 44.0% at a 35% TURBO blend. The blend has
+    to travel through luma, which is where the residual lives, and a colormap's brightness
+    does not rise with depth; over a mid-depth region it lifts the background's luma toward
+    the text's and cancels the contrast being looked for. The eye reads the hue and sees the
+    text jump out. The extractor reads the luma and sees it recede.
+    """
+    if guide is None or not cfg.depth_strokes:
+        return None
+    found = analyse_crop(np.ascontiguousarray(guide, dtype=np.float32), cfg,
+                         text_height=text_height)
+    if found is None:
+        return None
+    # Only where the picture already saw a stroke nearby. What the depth map holds is not the
+    # writing but the slab DepthCrafter laid over it, which is the writing plus its halo and,
+    # on text set tightly enough, several letters run together. Unconstrained that reads as a
+    # fatter, merged glyph: on one clip the depth shape came back 1.48x the size of the luma
+    # one with 81% of it outside any stroke, and the mask nearly doubled. Held to within a
+    # stroke's reach of something the picture found, it fills the letters in instead of
+    # inflating them, which is the half of the idea that is worth having.
+    return found.shape if near is None else found.shape * near
+
+
 def extract_patch(frame: np.ndarray, det: Detection, cfg: StrokeConfig,
                   depth: np.ndarray | None = None) -> AlphaPatch | None:
     """Extract a soft glyph alpha for one detection. Returns None if nothing survives.
@@ -571,19 +611,28 @@ def extract_patch(frame: np.ndarray, det: Detection, cfg: StrokeConfig,
     if stats is None:
         return None
 
+    guide = depth[y0:y1, x0:x1] if depth is not None else None
+    reach = max(3, int(round(_stroke_width(stats.shape > 0.5)))) | 1
+    near = cv2.dilate((stats.shape > 0.5).astype(np.uint8),
+                      cv2.getStructuringElement(cv2.MORPH_ELLIPSE, (reach, reach))) > 0
+    strokes = _read_depth_strokes(guide, cfg, det.height, near=near)
+    # The depth map has an opinion about where the writing is, and it is not the picture's
+    # opinion. Union rather than replace: it finds glyph the luma residual misses and brings
+    # no background with it, but it only sees text DepthCrafter reacted to.
+    combined = stats.shape if strokes is None else np.maximum(stats.shape, strokes)
+
     # Identify the strokes on the normalised shape, so a faded credit is judged the same as
     # a solid one, then scale the survivors back to the opacity they are actually showing at.
-    binary = (stats.shape > 0.5).astype(np.uint8)
+    binary = (combined > 0.5).astype(np.uint8)
     if not binary.any():
         return None
 
-    kept = _filter_components(binary, cfg, det.height, shape=stats.shape,
-                              depth=depth[y0:y1, x0:x1] if depth is not None else None,
+    kept = _filter_components(binary, cfg, det.height, shape=combined, depth=guide,
                               chroma=chromaticity(crop) if cfg.chroma_tol > 0 else None)
     if kept is None:
         return None
 
-    shape = stats.shape * kept
+    shape = combined * kept
     # After the component filter, never before it: that filter asks how strong each blob is
     # relative to the strongest text in the box, and filling a blob to 1 first would hand
     # every speck the fade amplified the same answer as the text.

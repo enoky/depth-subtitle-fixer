@@ -45,6 +45,7 @@ ARG_MAP: list[tuple[str, str, str]] = [
     ("solidify", "strokes", "solidify"),
     ("luma_tol", "strokes", "luma_tol"),
     ("rim_expand", "strokes", "rim_expand"),
+    ("depth_strokes", "strokes", "depth_strokes"),
     ("depth_tol", "strokes", "depth_tol"),
     ("chroma_tol", "strokes", "chroma_tol"),
     ("cluster_min_agree", "strokes", "cluster_min_agree"),
@@ -117,6 +118,15 @@ def add_detect_args(p: argparse.ArgumentParser) -> None:
     g.add_argument("--rim-expand", type=int,
                    help="px to grow the mask into a hard drawn outline (default 0; raise it "
                         "for outlined subtitles, leave it off for shadowed credits)")
+    g.add_argument("--depth-strokes", action=argparse.BooleanOptionalAction, default=None,
+                   help="also read the strokes out of the depth map and union them with the "
+                        "ones read out of the picture (default OFF; needs --depth). Luma "
+                        "cannot separate text from a background its own brightness and depth "
+                        "does not care about colour, so on a credit over its own colour this "
+                        "took recall from 52.9% to 55.5%. It is off because the depth map "
+                        "holds the slab over the writing rather than the writing, so where "
+                        "that slab is sharp it paints the text fatter than it is - check a "
+                        "preview")
     g.add_argument("--depth-tol", type=float,
                    help="floor under how far one glyph's depth may sit from the depth the "
                         "whole line reads at, as a fraction of the code range (default "
