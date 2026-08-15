@@ -2,8 +2,8 @@
 
 A plan, not a decision. Written after evaluating [Hi-SAM](https://github.com/ymy-k/Hi-SAM)
 (SAM-TS-L, TextSeg weights) against the extractor on two real credits, and holding the
-measurements up next to what ships today. The validation gate in Phase 0 has passed; the
-phases after it are still unbuilt.
+measurements up next to what ships today. Phase 0's validation gate has passed and Phase 1
+is built; Phases 2 to 4 are not.
 
 ## Why this is worth considering at all
 
@@ -12,47 +12,60 @@ writing and takes the difference. That fails, by construction, where the text is
 brightness of what it sits on - and on a credit crossing a subject's hair and shoulder it
 does not fail gracefully.
 
-Measured against labelled glyph masks on two clips, 77 frames in total:
+Measured on two clips against the labels `scripts/label_glyphs.py` writes, scored by
+`scripts/score_masks.py`, with Hi-SAM run full-frame as Phase 3 would run it:
 
-**V1-0005, "EMILY BEECHAM", 41 frames** - a credit crossing hair and shoulder
+**V1-0005, "EMILY BEECHAM", 28 frames** - a credit crossing hair and shoulder
 
 | | fgIoU (median) | recall | precision | worst frame | speed |
 |---|---|---|---|---|---|
-| luma (ships today) | 0.717 | 82.6% | **90.3%** | 0.153 | 0.074 s/frame |
-| luma + `--depth-strokes` | 0.714 | 85.2% | 86.1% | 0.270 | - |
-| Hi-SAM SAM-TS-L | **0.828** | **100%** | 83.0% | **0.704** | 0.20 s/frame |
+| luma (ships today) | 0.755 | 83.5% | **94.5%** | 0.226 | 0.074 s/frame |
+| luma + `--depth-strokes` | 0.762 | 87.6% | 90.0% | 0.406 | - |
+| Hi-SAM SAM-TS-L | **0.809** | **99.3%** | 82.3% | **0.786** | 0.25 s/frame |
 
 **V1-0007, "WITH / DAVID CORENSWET", 36 frames** - a near-static cockpit interior
 
 | | fgIoU (median) | recall | precision | worst frame | speed |
 |---|---|---|---|---|---|
-| luma | 0.785 | 89.0% | **92.1%** | 0.484 | - |
-| luma + `--depth-strokes` | 0.810 | 93.6% | 89.5% | 0.512 | - |
-| Hi-SAM SAM-TS-L | **0.872** | **100%** | 87.5% | **0.786** | 0.23 s/frame |
+| luma | 0.784 | 89.1% | **91.9%** | 0.480 | - |
+| luma + `--depth-strokes` | 0.807 | 93.5% | 89.0% | 0.506 | - |
+| Hi-SAM SAM-TS-L | **0.814** | **99.8%** | 82.3% | **0.746** | 0.25 s/frame |
 
-Hi-SAM was better on **69 of 69** frames across the two clips. On both, its *worst* frame beat
-the luma path's median, and its recall was exactly 100%.
+**On the median this is a modest win, and on the second clip a marginal one** - 0.814 against
+0.807 for `--depth-strokes`. What is bought is the tail rather than the average: the worst
+frame goes from 0.226 to 0.786 on the first clip and from 0.480 to 0.746 on the second. If
+the frames where a credit crosses hair matter more than the frames where it does not, that is
+worth paying for. If they do not, `--depth-strokes` already gets most of the way for nothing.
 
-The per-frame trace on the first clip is the vivid part: luma holds 0.72-0.78 and then
-collapses to 0.38 across frames 67-73, where the shot moves the credit over hair, while
-Hi-SAM does not move at all - 0.80 to 0.84, monotonic. But the second clip is the more
-useful result. There the luma path never collapses, never dropping below 0.484, and Hi-SAM
-still won every frame. So this is not only a rescue for disasters.
+Three things repeat across both clips, measured identically:
 
-What does not generalise is the size of the win: 0.111 of fgIoU on the hard clip against
-0.062 on the easier one. What does generalise is the shape of it - perfect recall, slightly
-lower precision, and no variance across frames.
+- **Recall of 99.3% and 99.8%.** It finds essentially every glyph pixel.
+- **Precision of 82.3% on both, to the decimal.** A consistent over-fill, not noise.
+- **It never collapses.** The luma path's worst frame is less than a third of its median on
+  the first clip; Hi-SAM's worst is within 3% of its own median on both.
+
+Full-frame inference costs the same as a crop - 0.25 s/frame either way, because SAM resizes
+to 1024 internally, so the four-fold increase in pixels is absorbed. That makes Phase 3's
+"once per frame, full-frame" the cheap option as well as the clean one.
+
+An earlier version of this document reported 0.828 and 0.872 for Hi-SAM against 0.717 and
+0.785, a margin of 0.111 and 0.062. Those were scored against a hand-built truth mask that
+contained a sunlit window Hi-SAM had correctly ignored, which flattered it. The corrected
+margins are 0.054 and 0.007. The conclusion holds; the size of it did not.
 
 Both methods find the small dim "WITH" caption on the second clip, so that class of text is
 not a differentiator. Hi-SAM covers 677 px of it against luma's 469, which is the same
 over-filling seen everywhere else rather than a difference in what was found.
 
-That collapse is the same failure that motivated the polarity fix, the depth agreement veto
-and `--depth-strokes`. All three are workarounds for a contrast heuristic meeting text the
-colour of its background. A model trained on stroke masks does not have the failure mode.
+Where the luma path collapses is where a credit crosses something its own brightness, and
+that is the same failure the polarity fix, the depth agreement veto and `--depth-strokes`
+were all written to work around. A model trained on stroke masks does not have it: this is
+the difference between patching a heuristic where it breaks and using something that does not
+break there.
 
-Speed was measured on an RTX 5080 with a cu130 torch build: 0.2 s/frame against 6.0 s/frame
-on CPU, identical accuracy. A 129-frame render goes from ~10 s to ~35 s.
+Timings are an RTX 5080 with a cu130 torch build. On CPU the same inference is 6.0 s/frame
+with identical masks, so a GPU is not optional. At 0.25 s/frame a 129-frame render goes from
+about ten seconds to thirty-five - fine offline, and not fine for a 2500-clip scan.
 
 ## The architectural fit
 
@@ -81,18 +94,21 @@ Do not be tempted.
 The gate was one credit is not evidence of generalisation, so run a second clip with a
 different credit style and stop if Hi-SAM does not also beat ~0.72 median fgIoU.
 
-It scored 0.872 against the luma path's 0.785 on V1-0007, winning 36 of 36 frames. Combined
-with 33 of 33 on V1-0005, that is 69 of 69. **Phase 1 onwards is justified.**
+It scored 0.814 against the luma path's 0.784 on V1-0007, and 0.809 against 0.755 on
+V1-0005. **Phase 1 onwards is justified**, though see above: the margin over
+`--depth-strokes` on the second clip is 0.007, and it is the worst frame rather than the
+median that carries the argument.
 
 Two clips is still two clips. What would change the conclusion now is a credit that is *not*
 this typeface family - both of these are the same stylised sci-fi face from the same title
 sequence - or one over a very different background: white subtitles on a night exterior,
 say, where the luma path is at its strongest and there is little for a learned model to add.
 
-## Phase 1 - make the measurement first-class
+## Phase 1 - make the measurement first-class: BUILT
 
-Worth building **whether or not Hi-SAM ever ships**. It would have caught three of the wrong
-turns that produced this plan.
+`scripts/label_glyphs.py` and `scripts/score_masks.py`, and every number above is scored with
+them. Worth having **whether or not Hi-SAM ever ships**: it would have caught three of the
+wrong turns that produced this plan, and it caught a fourth while being written.
 
 - `scripts/label_glyphs.py` - build a labelled glyph mask from a clip with static text.
   **Then filter components by the text line's own row band and a letter-plausible height**,
@@ -144,15 +160,16 @@ StrokeConfig.strokes_from: "luma" (default) | "hisam"
 In `extract_patch`, when `hisam`: take `shape` from the model's mask over the crop, `level`
 from `analyse_crop` as now. If either is missing, fall back to luma - never invent a level.
 
-**Measure full-frame cost before committing to it.** The 0.2 s/frame above is an 888x448 crop;
-1920x800 is about four times the pixels, though SAM's internal 1024 resize means it will not
-scale linearly. If it is bad, ViT-B is the lever: 87.15 against 88.77 fgIoU on TextSeg.
+Full-frame cost was the open question here and it is answered: 0.25 s/frame at 1920x800,
+the same as on an 888x448 crop, because SAM resizes to 1024 internally and the four-fold
+increase in pixels never reaches the model. ViT-B remains the lever if that is still too much
+- 87.15 against 88.77 fgIoU on TextSeg.
 
 ## Phase 4 - hybrid, only if the above holds
 
 The interesting endpoint, because the two are complementary rather than ranked: the luma path
-is *more precise* (90% against 83%) where contrast exists, and Hi-SAM is unbreakable where it
-does not. Use luma by default and fall back where it is weak - low `level`, few surviving
+is *more precise* (94.5% and 91.9% against 82.3%) where contrast exists, and Hi-SAM is
+unbreakable where it does not. Use luma by default and fall back where it is weak - low `level`, few surviving
 blobs, the agreement vote standing down.
 
 Defer this. The trigger needs validating across several clips or it is just a new way to be
@@ -192,6 +209,14 @@ other than what the code operates on. In order:
    *tool's* mask, which is smaller - a factor of two.
 5. The first Hi-SAM score was 64.2% recall, against a labelled mask that included a sunlit
    window the model had correctly ignored. Corrected, it was 100%.
+6. Then the corrected mask, built by hand, still had enough of that window left in it to
+   inflate Hi-SAM's margin from 0.054 to 0.111 on one clip and from 0.007 to 0.062 on the
+   other - because it was scoring the model for ignoring scenery. Only labelling the clips
+   with the tool built for it settled the numbers.
+7. And `--min-on` in that tool wanted 0.7 rather than the 0.9 that seemed obviously right,
+   because the frames found as carrying the text include the fade at each end. At 0.9 it
+   quietly dropped the last two letters of a line, which the contact sheet showed at once
+   and the pixel count did not.
 
 Two habits follow. **Look at the picture, not only the score** - a diff image found the last
 of these in seconds after the metric had hidden it for an hour. And **be suspicious of a
