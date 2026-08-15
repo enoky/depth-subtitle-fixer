@@ -3,7 +3,7 @@
 A plan, not a decision. Written after evaluating [Hi-SAM](https://github.com/ymy-k/Hi-SAM)
 (SAM-TS-L, TextSeg weights) against the extractor on two real credits, and holding the
 measurements up next to what ships today. Phase 0's validation gate has passed and Phases 1
-to 3 are built; Phase 4 is not.
+to 4 are built.
 
 ## Why this is worth considering at all
 
@@ -202,15 +202,84 @@ the same as on an 888x448 crop, because SAM resizes to 1024 internally and the f
 increase in pixels never reaches the model. ViT-B remains the lever if that is still too much
 - 87.15 against 88.77 fgIoU on TextSeg.
 
-## Phase 4 - hybrid, only if the above holds
+## Phase 4 - hybrid - BUILT
 
-The interesting endpoint, because the two are complementary rather than ranked: the luma path
-is *more precise* (94.5% and 91.9% against 82.3%) where contrast exists, and Hi-SAM is
-unbreakable where it does not. Use luma by default and fall back where it is weak - low `level`, few surviving
-blobs, the agreement vote standing down.
+`--strokes-from auto`. The residual answers first; the model is called only for the frames
+whose answer looks like it lost letters, and `--weak-fill` is where that line sits.
 
-Defer this. The trigger needs validating across several clips or it is just a new way to be
-wrong.
+### What the trigger turned out to be
+
+Three signals were proposed above - low `level`, few surviving blobs, the agreement vote
+standing down. **Two of the three do not work**, measured over both credits:
+
+- **`level` does not separate.** It reads 1.00 on every frame of both clips, ruined and
+  intact alike. The text is fully opaque while it is being lost; opacity is not the problem.
+- **Blob count does not separate.** Against the letters a box that wide should hold, the
+  intact frames run 2.1-2.6 and the collapsed ones 2.1-2.5. There is no gap to cut in.
+- **Fill does.** How much of the detector's boxes the mask actually fills: 0.199-0.222 on the
+  ruined frames against 0.315-0.405 on the intact ones, and 0.270-0.298 against 0.312-0.382
+  on the second clip.
+
+It has to be judged **over the frame, not box by box**. A box's own fill confuses a residual
+that lost letters with a line that is legitimately sparse - a short name in a wide box - and
+measured that way the trigger fired on some box of nearly every frame of a three-line credit:
+100% of frames at any threshold that helped quality, which is the model's whole cost for less
+than the model's quality. The cost is per frame regardless, because one forward pass serves
+every box in the picture.
+
+The raw margin is narrow - 0.298 against 0.312 on V1-0007 - but the *outcome* is flat from
+0.30 to 0.34 on both clips, so the plateau is much wider than the margin. 0.32 is its middle.
+
+### What it delivers
+
+Scored through the full pipeline against the same labels, over every labelled frame:
+
+**V1-0005**, 44 frames
+
+| | fgIoU | recall | precision | worst frame |
+|---|---|---|---|---|
+| luma | 0.758 | 84.0% | **94.5%** | 0.158 |
+| Hi-SAM | **0.795** | 99.4% | 80.6% | **0.434** |
+| `auto` | 0.780 | 86.2% | 94.0% | **0.434** |
+
+**V1-0007**, 44 frames (the credit; see the note below on 93-94)
+
+| | fgIoU | recall | precision | worst frame |
+|---|---|---|---|---|
+| luma | 0.781 | 88.9% | **92.1%** | 0.251 |
+| Hi-SAM | **0.794** | 99.8% | 80.2% | 0.249 |
+| `auto` | 0.787 | 89.3% | 91.8% | 0.249 |
+
+**`auto` takes Hi-SAM's worst frame and keeps luma's precision.** That is the whole of what it
+is for. The frames it does not trigger on are the ones the residual was already cutting more
+tightly than the model, and it leaves them alone.
+
+Cost on V1-0005, 129 frames: luma 10.2 s, `auto` 25.6 s, Hi-SAM 34 s. Roughly 10 s of `auto`'s
+time is constructing the ViT-L, paid once, and a clip whose credits never collapse never
+constructs it at all - `--weak-fill 0` measures 10.2 s against luma's 10.2 s.
+
+### What it does not do
+
+**It does not beat Hi-SAM on fgIoU, and the hypothesis above that it would is wrong.** Hi-SAM
+scores higher on both clips at every trigger setting; `auto` interpolates between the two
+rather than exceeding either. The case for it is worst-case insurance at a fraction of the
+cost, and precision that a fatter model mask gives up - not a better mask than the model's.
+
+Which of the three to use is therefore a real choice, not a ranking:
+
+- `luma` when the credits sit on clean backgrounds. Cheapest, most precise.
+- `auto` as the general default for mixed material. It cannot collapse, and it costs nothing
+  on the frames that did not need help.
+- `hisam` when recall matters more than precision or render time - the only one that reaches
+  99%+ of the glyph pixels.
+
+### One thing this does not touch
+
+The labels for V1-0007 include frames 93-94, a second caption later in the clip. All three
+sources score 0.000 there: nothing is detected at all. That is a detection-stage miss, not a
+stroke-shape one, and no setting here reaches it. It is why the V1-0007 table above is scored
+over the credit rather than over every labelled frame - scored over all 46, every source reads
+0.000 worst and the comparison says nothing.
 
 ## Risks
 

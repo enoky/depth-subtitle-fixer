@@ -150,3 +150,58 @@ def test_it_runs_without_moving_the_working_directory():
     mask = hisam.strokes(frame, device="cpu")
     assert os.getcwd() == before
     assert mask.shape == frame.shape[:2] and mask.dtype == np.float32
+
+
+def _det(x0, y0, x1, y1):
+    from dsf.detect.base import Detection
+    poly = np.array([[x0, y0], [x1, y0], [x1, y1], [x0, y1]], np.float32)
+    return Detection(poly=poly, score=0.9)
+
+
+def _patch(det, fill):
+    """A patch filling *fill* of its detection box."""
+    from dsf.refine.strokes import AlphaPatch
+    alpha = np.zeros((det.height, det.width), np.float32)
+    alpha[:max(1, int(round(det.height * fill)))] = 1.0
+    return AlphaPatch(x0=det.bbox[0], y0=det.bbox[1], alpha=alpha, det=det)
+
+
+def test_a_thin_frame_is_judged_over_the_whole_frame_not_box_by_box():
+    """A short name in a wide box is sparse without the residual having failed.
+
+    Measured box by box, the trigger fired on some box of nearly every frame of a three-line
+    credit - 100% of frames, which is the model's whole cost for less than the model's
+    quality. The frame's own fill separates instead: 0.199-0.222 on the ruined frames against
+    0.315-0.405 on the intact ones.
+    """
+    from dsf.config import StrokeConfig
+    from dsf.refine.strokes import looks_thin
+
+    cfg = StrokeConfig()
+    assert cfg.weak_fill == 0.32, "test setup: the fills below straddle this"
+    dets = [_det(0, 0, 100, 100), _det(0, 100, 100, 200)]
+
+    # One sparse line beside a full one is an ordinary credit, not a failure.
+    assert not looks_thin([_patch(dets[0], 0.15), _patch(dets[1], 0.55)], dets, cfg)
+    # Both lines gutted is the collapse this exists to catch.
+    assert looks_thin([_patch(dets[0], 0.20), _patch(dets[1], 0.20)], dets, cfg)
+    # And nothing surviving at all cannot be right under boxes the detector found.
+    assert looks_thin([None, None], dets, cfg)
+
+
+def test_the_model_is_not_loaded_for_a_frame_the_residual_handled(monkeypatch):
+    """`learned_strokes` has to stay silent unless asked, or "auto" costs what "hisam" costs."""
+    from dsf.config import PipelineConfig, StrokeConfig
+    from dsf.pipeline import learned_strokes
+
+    called = []
+    monkeypatch.setattr(hisam, "available", lambda: called.append(1) or False)
+    cfg = PipelineConfig(strokes=StrokeConfig(strokes_from="auto"))
+
+    assert learned_strokes(np.zeros((8, 8, 3), np.uint8), cfg) is None
+    assert not called, "auto must not reach for the model until a frame has been judged"
+
+    # ...and when a frame *is* judged thin, the same call goes through.
+    with pytest.warns(UserWarning, match="fetch_hisam"):
+        learned_strokes(np.zeros((8, 8, 3), np.uint8), cfg, force=True)
+    assert called, "a forced read must actually try the model"

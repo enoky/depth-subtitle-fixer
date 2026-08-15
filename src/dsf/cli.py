@@ -46,6 +46,7 @@ ARG_MAP: list[tuple[str, str, str]] = [
     ("luma_tol", "strokes", "luma_tol"),
     ("rim_expand", "strokes", "rim_expand"),
     ("strokes_from", "strokes", "strokes_from"),
+    ("weak_fill", "strokes", "weak_fill"),
     ("depth_strokes", "strokes", "depth_strokes"),
     ("depth_tol", "strokes", "depth_tol"),
     ("chroma_tol", "strokes", "chroma_tol"),
@@ -119,12 +120,18 @@ def add_detect_args(p: argparse.ArgumentParser) -> None:
     g.add_argument("--rim-expand", type=int,
                    help="px to grow the mask into a hard drawn outline (default 0; raise it "
                         "for outlined subtitles, leave it off for shadowed credits)")
-    g.add_argument("--strokes-from", choices=("luma", "hisam"),
+    g.add_argument("--strokes-from", choices=("luma", "hisam", "auto"),
                    help="where the stroke shape comes from (default luma). hisam reads it "
                         "with a model trained on stroke masks - see scripts/fetch_hisam.py "
                         "- which finds text the residual cannot separate from its own "
-                        "background, at 0.25 s a frame and slightly fatter strokes. The "
+                        "background, at 0.25 s a frame and slightly fatter strokes. auto "
+                        "reads it off the picture and only calls the model for a box that "
+                        "comes back too empty to be the line the detector found. The "
                         "opacity is read off the residual either way")
+    g.add_argument("--weak-fill", type=float,
+                   help="how full of mask a box must be for --strokes-from auto to accept the "
+                        "residual's answer (default 0.32, as a fraction of the box). Raise it "
+                        "to call the model more often")
     g.add_argument("--depth-strokes", action=argparse.BooleanOptionalAction, default=None,
                    help="also read the strokes out of the depth map and union them with the "
                         "ones read out of the picture (default OFF; needs --depth). Luma "

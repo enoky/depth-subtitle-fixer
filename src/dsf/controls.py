@@ -102,9 +102,14 @@ KNOBS: list[Knob] = [
     _k("luma_tol", "strokes", "luma_tol", "strokes_adv", "Outline colour tolerance", "slider",
        minimum=0.02, maximum=0.60, step=0.01),
     _k("strokes_from", "strokes", "strokes_from", "strokes_adv", "Stroke shape from", "radio",
-       choices=["luma", "hisam"],
+       choices=["luma", "hisam", "auto"],
        info="hisam uses a model trained on stroke masks; needs scripts/fetch_hisam.py, and "
-            "costs about 0.25 s a frame"),
+            "costs about 0.25 s a frame. auto reads the picture first and only calls the "
+            "model on frames where that came back too empty"),
+    _k("weak_fill", "strokes", "weak_fill", "strokes_adv", "Call the model below fill",
+       "slider", minimum=0.0, maximum=0.60, step=0.01,
+       info="for auto: how full of mask the text boxes must be to trust the picture alone; "
+            "raise it to call the model more often, 0 never calls it"),
     _k("depth_strokes", "strokes", "depth_strokes", "strokes_adv", "Read strokes from depth",
        "checkbox",
        info="union the glyphs the depth map sees with the ones the picture shows - finds "

@@ -146,7 +146,17 @@ class StrokeConfig:
     #: worst frame from 0.226 and 0.480 fgIoU to 0.786 and 0.746. It is *less* precise on the
     #: frames the residual handles well - 82.3% against 94.5% - and costs 0.25 s a frame
     #: against 0.074 for the whole pipeline. See docs/hisam-integration.md.
-    strokes_from: str = "luma"  # luma | hisam
+    strokes_from: str = "luma"  # luma | hisam | auto
+    #: For "auto": how full of mask the detection boxes have to be, over the frame, before the
+    #: residual's answer is believed. The detector found writing there, so a frame that comes
+    #: back a fifth full has lost letters, and that frame is re-read with the model.
+    #:
+    #: 0.32 sits in the middle of a plateau: 0.30 to 0.34 give the same masks on both clips
+    #: measured, which is a good deal wider than the gap between the worst good frame and the
+    #: best ruined one (0.312 against 0.298). Erring high is the safe direction - too high only
+    #: spends time, because the model scores better than the residual on every frame measured,
+    #: while too low lets a collapse through, which is the failure this exists to catch.
+    weak_fill: float = 0.32
 
     #: Also read the strokes out of the depth map and union them with the ones read out of
     #: the picture. The two fail in different places: luma cannot separate text from a

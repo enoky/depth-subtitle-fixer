@@ -22,7 +22,7 @@ from .detect.base import Detection, merge_detections
 from .filters import GeometryFilter, appearance_ok, persistence_ok, sliding_window
 from .media import is_sequence, open_depth_sink, probe, read_depth, read_rgb
 from .prefetch import depth_for, prefetch
-from .refine.strokes import AlphaPatch, extract_patch
+from .refine.strokes import AlphaPatch, extract_patch, looks_thin
 from .temporal import from_u8, smooth
 from .videoio import VideoInfo
 
@@ -53,7 +53,8 @@ def _chunks(iterable, size: int) -> Iterator[list]:
         yield batch
 
 
-def learned_strokes(frame: np.ndarray, cfg: PipelineConfig) -> np.ndarray | None:
+def learned_strokes(frame: np.ndarray, cfg: PipelineConfig,
+                    force: bool = False) -> np.ndarray | None:
     """The stroke mask a trained model reads off one frame, or None if it is not being used.
 
     Kept here rather than inside `extract_patch` so the model runs once for the picture
@@ -65,7 +66,7 @@ def learned_strokes(frame: np.ndarray, cfg: PipelineConfig) -> np.ndarray | None
     extractor falls back to the residual crop by crop, and a render that quietly used the
     slower-but-present path is better than one that stops after ninety frames.
     """
-    if cfg.strokes.strokes_from != "hisam":
+    if not force and cfg.strokes.strokes_from != "hisam":
         return None
     from .detect.base import resolve_device
     from .refine import hisam
@@ -204,14 +205,30 @@ def _detect_chunks(frames, chunk_size: int, every: int, detectors, geometry,
                 # ask about it: a forward pass costs the same over the frame as over one
                 # box, and a quarter of a second is not worth spending on a frame with no
                 # text in it.
-                learned = learned_strokes(frame, cfg) if dets else None
-                patches = []
-                for det in dets:
-                    patch = extract_patch(frame, det, cfg.strokes, depth=guide,
-                                          learned=learned)
-                    if patch is not None:
-                        patches.append(patch)
-                carry = (dets, patches)
+                learned = None
+                if dets and cfg.strokes.strokes_from == "hisam":
+                    learned = learned_strokes(frame, cfg)
+                patches = [extract_patch(frame, det, cfg.strokes, depth=guide,
+                                         learned=learned) for det in dets]
+
+                # "auto" asks the residual first and only pays for the model on the frames
+                # whose answer looks like it has lost letters. The order matters: the model
+                # cannot be run before there is something to judge, and running it on every
+                # frame to find out would be the whole cost of the feature.
+                #
+                # Once a frame has been paid for, every box in it is re-read, not just the
+                # ones that looked thin. The pass has already happened by then, so re-reading
+                # the rest is free, and it keeps one frame's mask from being cut half one way
+                # and half the other - the model's strokes are a little fatter than the
+                # residual's, and a line of each in the same picture shows the seam.
+                if dets and cfg.strokes.strokes_from == "auto" \
+                        and looks_thin(patches, dets, cfg.strokes):
+                    learned = learned_strokes(frame, cfg, force=True)
+                    if learned is not None:
+                        patches = [extract_patch(frame, det, cfg.strokes, depth=guide,
+                                                 learned=learned, force_learned=True)
+                                   or old for det, old in zip(dets, patches)]
+                carry = (dets, [p for p in patches if p is not None])
             # Frames where detection was skipped inherit the previous result. This is only
             # sound for static text, which is why detect_every > 1 belongs to the
             # `subtitles` profile and the `credits` profile pins it back to 1.

@@ -18,6 +18,7 @@ visible ringing after stereo warping.
 from __future__ import annotations
 
 from dataclasses import dataclass
+from typing import Sequence
 
 import cv2
 import numpy as np
@@ -547,6 +548,34 @@ def _keep_agreeing(blobs: list[np.ndarray], values: np.ndarray | None, tol: floa
     return [blob for i, blob in enumerate(blobs) if i not in rejected]
 
 
+def looks_thin(patches: Sequence[AlphaPatch | None], dets: Sequence[Detection],
+               cfg: StrokeConfig) -> bool:
+    """Whether the residual's answer for this *frame* looks like it has missed most of the text.
+
+    How much of the detector's boxes the mask actually fills. The detector found lines of
+    writing there, so an answer that comes back a fifth full has lost letters - which is what
+    happens when a credit crosses something its own brightness, and is the failure a stroke
+    model does not have.
+
+    Judged over the frame rather than box by box, for two reasons that agree. A box's own fill
+    conflates a residual that lost letters with a line that is legitimately sparse - a short
+    name in a wide box - and measured that way the trigger fired on some box of nearly every
+    frame of a three-line credit: 100% of frames at any threshold that helped, which is the
+    whole cost of the model for less than the model's quality. And the cost is per frame
+    anyway, because one forward pass serves every box in the picture. Over the frame the same
+    signal separates cleanly: 0.199-0.222 on the ruined frames against 0.315-0.405 on the good
+    ones, and 0.270-0.298 against 0.312-0.382 on a second clip.
+
+    It is the only signal of the several tried that separates at all. Opacity does not: the
+    text is solid on both the good frames and the ruined ones, and `level` reads 1.00 through
+    every frame of both clips measured. Nor does counting blobs against the letters a box that
+    wide should hold - 2.1 to 2.6 on the good frames and 2.1 to 2.5 on the collapsed ones.
+    """
+    ink = sum(float((p.alpha > 0.5).sum()) for p in patches if p is not None)
+    box = sum(max(1, d.width) * max(1, d.height) for d in dets)
+    return ink / max(box, 1) < cfg.weak_fill
+
+
 def _read_depth_strokes(guide: np.ndarray | None, cfg: StrokeConfig, text_height: float,
                         near: np.ndarray | None = None) -> np.ndarray | None:
     """The stroke shape as the *depth map* sees it, or None if it has nothing to say.
@@ -589,7 +618,8 @@ def _read_depth_strokes(guide: np.ndarray | None, cfg: StrokeConfig, text_height
 
 def extract_patch(frame: np.ndarray, det: Detection, cfg: StrokeConfig,
                   depth: np.ndarray | None = None,
-                  learned: np.ndarray | None = None) -> AlphaPatch | None:
+                  learned: np.ndarray | None = None,
+                  force_learned: bool = False) -> AlphaPatch | None:
     """Extract a soft glyph alpha for one detection. Returns None if nothing survives.
 
     *depth* is the corrupted depth map itself, as a full-frame float32 in [0, 1] at this
@@ -603,6 +633,10 @@ def extract_patch(frame: np.ndarray, det: Detection, cfg: StrokeConfig,
     pass costs the same over the picture as over a detection box, so carving it up would be N
     times the price of the one answer the boxes are cut from. The opacity is still read off
     the residual either way - see `CropStats`.
+
+    *force_learned* uses it regardless of `cfg.strokes_from`, which is how "auto" re-reads the
+    one box whose residual answer came back thin. The caller has already looked at that answer
+    and decided, so this does not second-guess it.
     """
     h, w = frame.shape[:2]
     x0, y0, x1, y1 = det.bbox
@@ -622,7 +656,7 @@ def extract_patch(frame: np.ndarray, det: Detection, cfg: StrokeConfig,
     # nothing to say about a crop the luma shape stands, because a patch with no shape and a
     # level is not a mask, and one with a shape and an invented level is worse.
     base, segmented = stats.shape, False
-    if cfg.strokes_from == "hisam" and learned is not None:
+    if (force_learned or cfg.strokes_from == "hisam") and learned is not None:
         found = np.clip(learned[y0:y1, x0:x1], 0.0, 1.0).astype(np.float32)
         if float((found > 0.5).sum()) >= cfg.min_cc_area:
             base, segmented = found, True
