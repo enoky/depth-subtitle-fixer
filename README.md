@@ -29,6 +29,29 @@ On Linux/macOS use `scripts/setup.sh`.
 
 Model weights (~180 MB, docTR + CRAFT) download on first run into `./models/`.
 
+### Optional: reading strokes with a trained model
+
+The extractor reads strokes off a luma residual, which cannot work where the text is the
+brightness of what it sits on. [Hi-SAM](https://github.com/ymy-k/Hi-SAM)'s SAM-TS is trained
+on stroke masks and does not have that failure mode - measured on two credits it recovers
+99%+ of the glyph pixels against the residual's 84-89%, and where the residual collapses its
+worst frame is three times better. It costs 0.25 s a frame on a GPU against 0.074 for the
+whole current pipeline, and it is less precise on the easy frames. See
+[docs/hisam-integration.md](docs/hisam-integration.md) for the measurements and the plan.
+
+```bash
+.venv/Scripts/python scripts/fetch_hisam.py
+```
+
+That clones the model at a pinned commit into `./models/` and downloads SAM's backbone. One
+118 MB file it cannot fetch: the SAM-TS head is published only through a OneDrive share that
+refuses programmatic access, so the script prints the link and the path to save it at. It
+also needs `einops` and `timm`, which it reports rather than installs - every `pip install`
+into this venv is a chance to lose the CUDA OpenCV.
+
+**Licence:** those weights are trained on TextSeg, which is academia-only and cannot be used
+on commercial work, and that inherits.
+
 ### The CUDA OpenCV build
 
 `setup.ps1` finishes by installing a CUDA-enabled OpenCV in place of the stock wheel, because

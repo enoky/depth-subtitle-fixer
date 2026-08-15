@@ -2,8 +2,8 @@
 
 A plan, not a decision. Written after evaluating [Hi-SAM](https://github.com/ymy-k/Hi-SAM)
 (SAM-TS-L, TextSeg weights) against the extractor on two real credits, and holding the
-measurements up next to what ships today. Phase 0's validation gate has passed and Phase 1
-is built; Phases 2 to 4 are not.
+measurements up next to what ships today. Phase 0's validation gate has passed and Phases 1
+and 2 are built; Phases 3 and 4 are not.
 
 ## Why this is worth considering at all
 
@@ -131,14 +131,28 @@ wrong turns that produced this plan, and it caught a fourth while being written.
 - `scripts/score_masks.py` - fgIoU, recall and precision of any mask source against a
   labelled clip.
 
-## Phase 2 - vendor the model behind a flag
+## Phase 2 - get the model behind a boundary: BUILT
 
-- Vendor `hi_sam/modeling/`; it is not a pip package. It derives from `segment-anything` and
-  `sam-hq` - carry their notices.
-- `src/dsf/refine/hisam.py`: load once, cache the predictor, expose
-  `strokes(frame) -> float32 mask`.
-- Checkpoints into `models/hisam/`, alongside the docTR and EasyOCR caches that
-  `configure_model_cache` already manages.
+`src/dsf/refine/hisam.py` and `scripts/fetch_hisam.py`.
+
+**It is not vendored, and the plan said it would be.** That was written before anyone counted
+the code: `hi_sam/modeling` is about 5,000 lines against this project's 5,357, so copying it
+in would double the repository with third-party PyTorch nobody here maintains, and take on
+Apache-2.0 redistribution obligations to do it. It is cloned at a pinned commit into
+`models/` instead - already where downloaded weights live, already ignored by git - and the
+pin is what keeps a measurement reproducible.
+
+Two things that only showed up in the building:
+
+The upstream builder resolves SAM's backbone through a path relative to the *process's*
+working directory, which is why its own demo has to be run from its own folder. A library
+cannot inherit that: frames are decoded on a worker thread and `chdir` is process-wide, so a
+load would move the ground under a decode running beside it. Building with no checkpoint and
+merging the two state dicts by absolute path is the same arithmetic without the hazard.
+
+And the head cannot be fetched by script at all, so `fetch_hisam.py` prints the link and the
+target path and returns non-zero. It reports the two extra imports rather than installing
+them, because every `pip install` into this venv is a chance to lose the CUDA OpenCV.
 
 **Setup cannot be fully scripted.** The SAM-TS head is distributed only via OneDrive and
 refuses programmatic access - the short link, the share API against both the short and the
