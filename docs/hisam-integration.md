@@ -1,8 +1,9 @@
 # Hi-SAM as a stroke source
 
 A plan, not a decision. Written after evaluating [Hi-SAM](https://github.com/ymy-k/Hi-SAM)
-(SAM-TS-L, TextSeg weights) against the extractor on one real credit, and holding the
-measurements up next to what ships today.
+(SAM-TS-L, TextSeg weights) against the extractor on two real credits, and holding the
+measurements up next to what ships today. The validation gate in Phase 0 has passed; the
+phases after it are still unbuilt.
 
 ## Why this is worth considering at all
 
@@ -11,18 +12,40 @@ writing and takes the difference. That fails, by construction, where the text is
 brightness of what it sits on - and on a credit crossing a subject's hair and shoulder it
 does not fail gracefully.
 
-Measured over 41 frames of one credit, against a labelled glyph mask:
+Measured against labelled glyph masks on two clips, 77 frames in total:
+
+**V1-0005, "EMILY BEECHAM", 41 frames** - a credit crossing hair and shoulder
 
 | | fgIoU (median) | recall | precision | worst frame | speed |
 |---|---|---|---|---|---|
 | luma (ships today) | 0.717 | 82.6% | **90.3%** | 0.153 | 0.074 s/frame |
 | luma + `--depth-strokes` | 0.714 | 85.2% | 86.1% | 0.270 | - |
-| Hi-SAM SAM-TS-L | **0.828** | **100%** | 83.0% | **0.704** | 0.2 s/frame |
+| Hi-SAM SAM-TS-L | **0.828** | **100%** | 83.0% | **0.704** | 0.20 s/frame |
 
-Hi-SAM was better on **33 of 33** frames where the credit was solid, and its worst frame beat
-the luma path's median. The per-frame trace is the interesting part: the luma path holds
-0.72-0.78 and then collapses to 0.38 across frames 67-73, which is where the shot moves the
-credit over hair. Hi-SAM does not move at all - 0.80 to 0.84, monotonic.
+**V1-0007, "WITH / DAVID CORENSWET", 36 frames** - a near-static cockpit interior
+
+| | fgIoU (median) | recall | precision | worst frame | speed |
+|---|---|---|---|---|---|
+| luma | 0.785 | 89.0% | **92.1%** | 0.484 | - |
+| luma + `--depth-strokes` | 0.810 | 93.6% | 89.5% | 0.512 | - |
+| Hi-SAM SAM-TS-L | **0.872** | **100%** | 87.5% | **0.786** | 0.23 s/frame |
+
+Hi-SAM was better on **69 of 69** frames across the two clips. On both, its *worst* frame beat
+the luma path's median, and its recall was exactly 100%.
+
+The per-frame trace on the first clip is the vivid part: luma holds 0.72-0.78 and then
+collapses to 0.38 across frames 67-73, where the shot moves the credit over hair, while
+Hi-SAM does not move at all - 0.80 to 0.84, monotonic. But the second clip is the more
+useful result. There the luma path never collapses, never dropping below 0.484, and Hi-SAM
+still won every frame. So this is not only a rescue for disasters.
+
+What does not generalise is the size of the win: 0.111 of fgIoU on the hard clip against
+0.062 on the easier one. What does generalise is the shape of it - perfect recall, slightly
+lower precision, and no variance across frames.
+
+Both methods find the small dim "WITH" caption on the second clip, so that class of text is
+not a differentiator. Hi-SAM covers 677 px of it against luma's 469, which is the same
+over-filling seen everywhere else rather than a difference in what was found.
 
 That collapse is the same failure that motivated the polarity fix, the depth agreement veto
 and `--depth-strokes`. All three are workarounds for a contrast heuristic meeting text the
@@ -53,28 +76,42 @@ A segmentation confidence is *not* an opacity. A confidently-detected 30%-opacit
 scores high, and stamping it at full strength would make the text snap in instead of easing.
 Do not be tempted.
 
-## Phase 0 - validation gate
+## Phase 0 - validation gate: PASSED
 
-**Do this before writing any code.**
+The gate was one credit is not evidence of generalisation, so run a second clip with a
+different credit style and stop if Hi-SAM does not also beat ~0.72 median fgIoU.
 
-One credit, one font, one shot is not evidence of generalisation. Run the harness on a second
-clip with a different credit style. If Hi-SAM does not also beat ~0.72 median fgIoU there,
-stop: the honest conclusion is that it suits this clip rather than this problem.
+It scored 0.872 against the luma path's 0.785 on V1-0007, winning 36 of 36 frames. Combined
+with 33 of 33 on V1-0005, that is 69 of 69. **Phase 1 onwards is justified.**
 
-This gate exists because five separate results in the session that produced this document
-were overturned by measurement errors, including the first Hi-SAM score. See *How to measure*
-below before trusting any number.
+Two clips is still two clips. What would change the conclusion now is a credit that is *not*
+this typeface family - both of these are the same stylised sci-fi face from the same title
+sequence - or one over a very different background: white subtitles on a night exterior,
+say, where the luma path is at its strongest and there is little for a learned model to add.
 
 ## Phase 1 - make the measurement first-class
 
 Worth building **whether or not Hi-SAM ever ships**. It would have caught three of the wrong
 turns that produced this plan.
 
-- `scripts/label_glyphs.py` - build a labelled glyph mask from a clip with static text, by
-  persistence: per pixel, how often is it bright text-coloured across the frames the credit is
-  up. The credit holds still while the shot moves under it, so the letters answer always.
-  **Then filter components by the text line's own row band and a letter-plausible height.**
-  Emit a contact sheet alongside the mask.
+- `scripts/label_glyphs.py` - build a labelled glyph mask from a clip with static text.
+  **Then filter components by the text line's own row band and a letter-plausible height**,
+  and emit a contact sheet alongside the mask. Two methods are needed, because which one
+  works depends on the shot:
+
+  - **Persistence**, for a moving shot: per pixel, how often is it bright text-coloured
+    across the frames the credit is up. The credit holds still while the scene moves under
+    it, so the letters answer always and the background does not.
+  - **On/off differencing**, for a static shot: mean text-coloured over the frames the credit
+    is up, minus the same over frames where it is absent. V1-0007 needs this - the camera
+    barely moves and the cockpit is the same amber as the credit, so persistence alone marks
+    the scenery as confidently as the writing.
+
+  Both need a sanity look at the picture. Persistence on V1-0005 swept in a sunlit window,
+  which is exactly as static as static text, and it cost an hour of wrong conclusions before
+  anyone looked. Differencing on V1-0007 breaks down if the colour threshold is lowered far
+  enough that the off frames also register, which shows up as holes punched through the
+  letters.
 - `scripts/score_masks.py` - fgIoU, recall and precision of any mask source against a
   labelled clip.
 
