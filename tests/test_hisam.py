@@ -100,6 +100,38 @@ def test_unload_lets_the_memory_go(monkeypatch):
     assert hisam.predictor() is not first
 
 
+def test_a_segmented_word_is_not_thrown_out_for_being_too_big():
+    """The filters that ask "too big to be a letter" are about what a residual gets wrong.
+
+    A residual answers to anything thin and contrasty, so a slab filling the crop is a lit
+    wall it mistook for writing, and the cap at 35% of the crop is what removes it. A model
+    trained on stroke masks has already settled that question, and its strokes come out a
+    little fatter than the letters, which on tightly-set text joins them up. Measured on a
+    real credit, a whole word arrived as one 9,649 px component where the residual had given
+    fourteen letters, the cap threw the word away, and the mask came out at 0.447 fgIoU
+    against the 0.817 the model had actually produced.
+    """
+    from dsf.config import StrokeConfig
+    from dsf.refine.strokes import _filter_components, _stroke_width, stroke_bounds
+
+    # Letters joined along a baseline, which is what merging looks like - not a slab. A slab
+    # would be rejected for its stroke width instead, and would prove nothing about the cap.
+    crop = np.zeros((80, 260), np.uint8)
+    crop[52:70, 20:240] = 1
+    for x in range(22, 236, 26):
+        crop[22:52, x:x + 16] = 1
+    cfg = StrokeConfig()
+    assert int(crop.sum()) > cfg.max_cc_area_frac * crop.size, "test setup: not over the cap"
+    lo, hi = stroke_bounds(cfg, 70)
+    assert lo <= _stroke_width(crop > 0) <= hi, "test setup: rejected for thickness, not size"
+
+    residual = _filter_components(crop, cfg, text_height=70, segmented=False)
+    model = _filter_components(crop, cfg, text_height=70, segmented=True)
+    assert residual is None, "the cap should still remove a slab a residual found"
+    assert model is not None and float(model.mean()) > 0.3, \
+        "a word a stroke model segmented must survive its own size"
+
+
 @pytest.mark.slow
 def test_it_runs_without_moving_the_working_directory():
     """The upstream builder finds SAM through a path relative to the process's cwd.

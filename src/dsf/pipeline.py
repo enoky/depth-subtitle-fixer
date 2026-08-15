@@ -53,6 +53,30 @@ def _chunks(iterable, size: int) -> Iterator[list]:
         yield batch
 
 
+def learned_strokes(frame: np.ndarray, cfg: PipelineConfig) -> np.ndarray | None:
+    """The stroke mask a trained model reads off one frame, or None if it is not being used.
+
+    Kept here rather than inside `extract_patch` so the model runs once for the picture
+    instead of once per detection box. A forward pass costs the same either way - the input
+    is resized to 1024 before it reaches the model - so N boxes would be N times the price of
+    the one answer they are all cut from.
+
+    A missing install is not an error at this level. `strokes_from` is a preference, the
+    extractor falls back to the residual crop by crop, and a render that quietly used the
+    slower-but-present path is better than one that stops after ninety frames.
+    """
+    if cfg.strokes.strokes_from != "hisam":
+        return None
+    from .detect.base import resolve_device
+    from .refine import hisam
+
+    if not hisam.available():
+        warnings.warn("strokes_from='hisam' but the model is not installed; "
+                      "run scripts/fetch_hisam.py. Falling back to the luma residual.")
+        return None
+    return hisam.strokes(frame, device=resolve_device(cfg.detect.device))
+
+
 def depth_guide(plane: np.ndarray, info: VideoInfo, width: int, height: int,
                 cfg: PipelineConfig) -> np.ndarray:
     """One depth frame as a float32 [0, 1] plane the size of the RGB frame it describes.
@@ -176,9 +200,15 @@ def _detect_chunks(frames, chunk_size: int, every: int, detectors, geometry,
                 dets = geometry(results[i])
                 if cfg.filters.scene_text == "keep":
                     dets = [d for d in dets if appearance_ok(frame, d, cfg.filters)]
+                # Once for the whole picture, and only when something survived the gates to
+                # ask about it: a forward pass costs the same over the frame as over one
+                # box, and a quarter of a second is not worth spending on a frame with no
+                # text in it.
+                learned = learned_strokes(frame, cfg) if dets else None
                 patches = []
                 for det in dets:
-                    patch = extract_patch(frame, det, cfg.strokes, depth=guide)
+                    patch = extract_patch(frame, det, cfg.strokes, depth=guide,
+                                          learned=learned)
                     if patch is not None:
                         patches.append(patch)
                 carry = (dets, patches)

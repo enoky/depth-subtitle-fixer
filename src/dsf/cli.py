@@ -45,6 +45,7 @@ ARG_MAP: list[tuple[str, str, str]] = [
     ("solidify", "strokes", "solidify"),
     ("luma_tol", "strokes", "luma_tol"),
     ("rim_expand", "strokes", "rim_expand"),
+    ("strokes_from", "strokes", "strokes_from"),
     ("depth_strokes", "strokes", "depth_strokes"),
     ("depth_tol", "strokes", "depth_tol"),
     ("chroma_tol", "strokes", "chroma_tol"),
@@ -118,6 +119,12 @@ def add_detect_args(p: argparse.ArgumentParser) -> None:
     g.add_argument("--rim-expand", type=int,
                    help="px to grow the mask into a hard drawn outline (default 0; raise it "
                         "for outlined subtitles, leave it off for shadowed credits)")
+    g.add_argument("--strokes-from", choices=("luma", "hisam"),
+                   help="where the stroke shape comes from (default luma). hisam reads it "
+                        "with a model trained on stroke masks - see scripts/fetch_hisam.py "
+                        "- which finds text the residual cannot separate from its own "
+                        "background, at 0.25 s a frame and slightly fatter strokes. The "
+                        "opacity is read off the residual either way")
     g.add_argument("--depth-strokes", action=argparse.BooleanOptionalAction, default=None,
                    help="also read the strokes out of the depth map and union them with the "
                         "ones read out of the picture (default OFF; needs --depth). Luma "

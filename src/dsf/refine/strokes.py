@@ -588,7 +588,8 @@ def _read_depth_strokes(guide: np.ndarray | None, cfg: StrokeConfig, text_height
 
 
 def extract_patch(frame: np.ndarray, det: Detection, cfg: StrokeConfig,
-                  depth: np.ndarray | None = None) -> AlphaPatch | None:
+                  depth: np.ndarray | None = None,
+                  learned: np.ndarray | None = None) -> AlphaPatch | None:
     """Extract a soft glyph alpha for one detection. Returns None if nothing survives.
 
     *depth* is the corrupted depth map itself, as a full-frame float32 in [0, 1] at this
@@ -596,6 +597,12 @@ def extract_patch(frame: np.ndarray, det: Detection, cfg: StrokeConfig,
     reject blobs that cannot be part of the same text, never to find text: the map is the
     thing being repaired, and how strongly it responded to any given credit is not something
     to bet a glyph on. Without it the extraction is exactly what it was.
+
+    *learned* is a full-frame stroke mask from `dsf.refine.hisam`, used for the shape when
+    `cfg.strokes_from` asks for it. It arrives whole rather than per crop because one forward
+    pass costs the same over the picture as over a detection box, so carving it up would be N
+    times the price of the one answer the boxes are cut from. The opacity is still read off
+    the residual either way - see `CropStats`.
     """
     h, w = frame.shape[:2]
     x0, y0, x1, y1 = det.bbox
@@ -611,15 +618,24 @@ def extract_patch(frame: np.ndarray, det: Detection, cfg: StrokeConfig,
     if stats is None:
         return None
 
+    # The model supplies the shape; the residual keeps supplying the level. Where it has
+    # nothing to say about a crop the luma shape stands, because a patch with no shape and a
+    # level is not a mask, and one with a shape and an invented level is worse.
+    base, segmented = stats.shape, False
+    if cfg.strokes_from == "hisam" and learned is not None:
+        found = np.clip(learned[y0:y1, x0:x1], 0.0, 1.0).astype(np.float32)
+        if float((found > 0.5).sum()) >= cfg.min_cc_area:
+            base, segmented = found, True
+
     guide = depth[y0:y1, x0:x1] if depth is not None else None
-    reach = max(3, int(round(_stroke_width(stats.shape > 0.5)))) | 1
-    near = cv2.dilate((stats.shape > 0.5).astype(np.uint8),
+    reach = max(3, int(round(_stroke_width(base > 0.5)))) | 1
+    near = cv2.dilate((base > 0.5).astype(np.uint8),
                       cv2.getStructuringElement(cv2.MORPH_ELLIPSE, (reach, reach))) > 0
     strokes = _read_depth_strokes(guide, cfg, det.height, near=near)
     # The depth map has an opinion about where the writing is, and it is not the picture's
     # opinion. Union rather than replace: it finds glyph the luma residual misses and brings
     # no background with it, but it only sees text DepthCrafter reacted to.
-    combined = stats.shape if strokes is None else np.maximum(stats.shape, strokes)
+    combined = base if strokes is None else np.maximum(base, strokes)
 
     # Identify the strokes on the normalised shape, so a faded credit is judged the same as
     # a solid one, then scale the survivors back to the opacity they are actually showing at.
@@ -628,7 +644,8 @@ def extract_patch(frame: np.ndarray, det: Detection, cfg: StrokeConfig,
         return None
 
     kept = _filter_components(binary, cfg, det.height, shape=combined, depth=guide,
-                              chroma=chromaticity(crop) if cfg.chroma_tol > 0 else None)
+                              chroma=chromaticity(crop) if cfg.chroma_tol > 0 else None,
+                              segmented=segmented)
     if kept is None:
         return None
 
@@ -663,8 +680,8 @@ def stroke_bounds(cfg: StrokeConfig, text_height: float) -> tuple[float, float]:
 def _filter_components(binary: np.ndarray, cfg: StrokeConfig, text_height: float = 0.0,
                        shape: np.ndarray | None = None,
                        depth: np.ndarray | None = None,
-                       chroma: tuple[np.ndarray, np.ndarray] | None = None
-                       ) -> np.ndarray | None:
+                       chroma: tuple[np.ndarray, np.ndarray] | None = None,
+                       segmented: bool = False) -> np.ndarray | None:
     """Drop connected components that do not look like glyph strokes.
 
     Two kinds of test, in two passes. The first asks of each blob on its own whether it is
@@ -695,17 +712,29 @@ def _filter_components(binary: np.ndarray, cfg: StrokeConfig, text_height: float
         x, y, bw, bh, area = stats[label]
         if area < cfg.min_cc_area:
             continue
-        if area > cfg.max_cc_area_frac * crop_area:
-            continue  # a background slab, not a letter
-        # A component that spans the whole crop is background bleed.
-        if bw >= max_span_w and bh >= max_span_h:
-            continue
+        # Three tests that all ask "is this blob too big to be a letter", and all three are
+        # about what a *residual* gets wrong. A residual answers to anything thin and
+        # contrasty, so a slab is a lit wall it mistook for writing and size is the evidence
+        # against it. A model trained on stroke masks has already settled that question, and
+        # its strokes come out a little fatter than the letters, which on tightly-set text
+        # joins them up - so every measure of bigness reads a whole word where the residual
+        # would have given separate letters. Measured on two real credits: one word arrived
+        # as a single 9,649 px component against a 7,669 px cap, and another measured 37.7
+        # of stroke width against a 36.5 limit, because `_stroke_width` takes the *peak* of
+        # the distance transform and the junction where two fat strokes meet is thicker than
+        # either of them. The letters either side of it measure 15 to 19.
+        if not segmented:
+            if area > cfg.max_cc_area_frac * crop_area:
+                continue  # a background slab, not a letter
+            # A component that spans the whole crop is background bleed.
+            if bw >= max_span_w and bh >= max_span_h:
+                continue
 
         comp = (labels == label)
         if shape is not None and float(shape[comp].max()) < cfg.min_relative_strength:
             continue
         sw = _stroke_width(comp)
-        if not (min_stroke <= sw <= max_stroke):
+        if sw < min_stroke or (not segmented and sw > max_stroke):
             continue
 
         blobs.append(comp)

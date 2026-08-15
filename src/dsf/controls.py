@@ -101,6 +101,10 @@ KNOBS: list[Knob] = [
        info="only for hard drawn outlines; on shadowed text it speckles the glyphs"),
     _k("luma_tol", "strokes", "luma_tol", "strokes_adv", "Outline colour tolerance", "slider",
        minimum=0.02, maximum=0.60, step=0.01),
+    _k("strokes_from", "strokes", "strokes_from", "strokes_adv", "Stroke shape from", "radio",
+       choices=["luma", "hisam"],
+       info="hisam uses a model trained on stroke masks; needs scripts/fetch_hisam.py, and "
+            "costs about 0.25 s a frame"),
     _k("depth_strokes", "strokes", "depth_strokes", "strokes_adv", "Read strokes from depth",
        "checkbox",
        info="union the glyphs the depth map sees with the ones the picture shows - finds "

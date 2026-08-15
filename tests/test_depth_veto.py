@@ -434,7 +434,7 @@ def _guides_seen(rgb_path, depth_path, monkeypatch, **kw):
 
     seen: list[float] = []
 
-    def spy(frame, det, cfg, depth=None):
+    def spy(frame, det, cfg, depth=None, **rest):
         seen.append(float("nan") if depth is None else float(depth.mean()))
         return None
 

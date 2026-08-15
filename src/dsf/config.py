@@ -132,6 +132,22 @@ class StrokeConfig:
     #: shadow that title cards usually carry leaves a speckled crust on every glyph.
     rim_expand: int = 0
 
+    #: Where the stroke *shape* comes from. "luma" reads it off the background residual, which
+    #: is what has always shipped. "hisam" reads it with a model trained on stroke masks -
+    #: `dsf.refine.hisam`, fetched by `scripts/fetch_hisam.py`, and it falls back to luma
+    #: wherever the model is not installed or has nothing to say about a crop.
+    #:
+    #: Only the shape. How opaque the text is showing at is still measured off the residual,
+    #: because a segmentation confidence is not an opacity: a confidently-detected credit at
+    #: 30% scores as high as a solid one, and stamping that at full strength would make the
+    #: text snap in instead of easing.
+    #:
+    #: Measured on two credits: recall goes from 83.5% and 89.1% to 99.3% and 99.8%, and the
+    #: worst frame from 0.226 and 0.480 fgIoU to 0.786 and 0.746. It is *less* precise on the
+    #: frames the residual handles well - 82.3% against 94.5% - and costs 0.25 s a frame
+    #: against 0.074 for the whole pipeline. See docs/hisam-integration.md.
+    strokes_from: str = "luma"  # luma | hisam
+
     #: Also read the strokes out of the depth map and union them with the ones read out of
     #: the picture. The two fail in different places: luma cannot separate text from a
     #: background the same brightness, which is most of what goes wrong on a credit over a

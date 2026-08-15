@@ -3,7 +3,7 @@
 A plan, not a decision. Written after evaluating [Hi-SAM](https://github.com/ymy-k/Hi-SAM)
 (SAM-TS-L, TextSeg weights) against the extractor on two real credits, and holding the
 measurements up next to what ships today. Phase 0's validation gate has passed and Phases 1
-and 2 are built; Phases 3 and 4 are not.
+to 3 are built; Phase 4 is not.
 
 ## Why this is worth considering at all
 
@@ -160,7 +160,30 @@ resolved URL, and `download.aspx` all returned 401/400/403. `scripts/setup.ps1` 
 link and the target path and stop. The SAM ViT-L encoder *is* directly fetchable from
 `dl.fbaipublicfiles.com` (1.25 GB), so only the 118 MB head needs a human.
 
-## Phase 3 - wire it in
+## Phase 3 - wire it in: BUILT
+
+`--strokes-from hisam`. Through the pipeline it scores 0.797 and 0.796 fgIoU against the
+residual's 0.755 and 0.784, with recall of 99.4% and 99.9% and worst frames of 0.752 and
+0.720 against 0.226 and 0.480 - which is the standalone result, arrived at through every
+gate and filter rather than beside them.
+
+Getting there needed two fixes, and they are the same mistake twice. The component filter
+asks three times whether a blob is too big to be a letter - its area against a share of the
+crop, whether it spans the crop, and its stroke width - and all three are calibrated on what
+a *residual* gets wrong. A residual answers to anything thin and contrasty, so size is
+evidence against text. A model trained on stroke masks has already settled that, and its
+strokes come out a little fatter, which on tightly-set text joins the letters up. So one word
+arrived as a single 9,649 px component against a 7,669 px cap and was discarded, and on the
+second clip a joined word measured 37.7 of stroke width against a 36.5 limit - because
+`_stroke_width` takes the *peak* of the distance transform and the junction where two fat
+strokes meet is thicker than either of them, while the letters either side measured 15 to 19.
+
+The first cost 0.809 -> 0.447 fgIoU and the second 0.814 -> 0.696, and neither showed up
+anywhere except in a score against labelled glyphs. The filters now skip those three tests
+when the shape came from a model, and keep the lower stroke bound, which is still about noise
+rather than about size.
+
+### As originally planned
 
 Run **once per frame, full-frame**, not once per detection crop: one inference beats N, and
 the geometry and appearance gates then intersect the result with accepted boxes, so filmed
